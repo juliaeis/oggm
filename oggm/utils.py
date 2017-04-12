@@ -6,6 +6,7 @@ import six.moves.cPickle as pickle
 from six import string_types
 from six.moves.urllib.request import urlretrieve, urlopen
 from six.moves.urllib.error import HTTPError, URLError, ContentTooShortError
+from six.moves.urllib.parse import urlparse
 
 # Builtins
 import glob
@@ -38,12 +39,11 @@ from salem import wgs84
 import xarray as xr
 import rasterio
 try:
-    from rasterio.tools.merge import merge as merge_tool
-except ImportError:
     # rasterio V > 1.0
     from rasterio.merge import merge as merge_tool
+except ImportError:
+    from rasterio.tools.merge import merge as merge_tool
 import multiprocessing as mp
-import filelock
 
 # Locals
 import oggm.cfg as cfg
@@ -79,32 +79,50 @@ MEMORY = Memory(cachedir=cfg.CACHE_DIR, verbose=0)
 # Function
 tuple2int = partial(np.array, dtype=np.int64)
 
+# Global Lock
+lock = mp.Lock()
+
 
 def _get_download_lock():
-    try:
-        lock_dir = cfg.PATHS['working_dir']
-    except:
-        lock_dir = cfg.CACHE_DIR
-    mkdir(lock_dir)
-    lockfile = os.path.join(lock_dir, 'oggm_data_download.lock')
-    try:
-        return filelock.FileLock(lockfile).acquire()
-    except:
-        return filelock.SoftFileLock(lockfile).acquire()
+    return lock
 
 
 def _urlretrieve(url, ofile, *args, **kwargs):
+    p = None
+    log = logging.getLogger('download')
+    cache_dir = cfg.PATHS['dl_cache_dir']
+    cache_ro = cfg.PARAMS['dl_cache_readonly']
     try:
-        return urlretrieve(url, ofile, *args, **kwargs)
+        if cache_dir and os.path.isdir(cache_dir):
+            p = urlparse(url)
+            p = os.path.join(cache_dir, p.netloc, p.path[1:])
+            if not os.path.exists(os.path.dirname(p)) and not cache_ro:
+                os.makedirs(os.path.dirname(p))
+            # TODO: Maybe figure out a way to verify the integrity of the cached file?
+            if os.path.isfile(p):
+                log.info("%s found in cache" % url)
+                shutil.copyfile(p, ofile)
+            else:
+                if not cache_ro:
+                    log.info("Caching request for %s" % url)
+                    urlretrieve(url, p, *args, **kwargs)
+                    shutil.copyfile(p, ofile)
+                else:
+                    log.info("%s not in cache. Cache is ro, not caching." % url)
+                    urlretrieve(url, ofile, *args, **kwargs)
+        else:
+            urlretrieve(url, ofile, *args, **kwargs)
+        return ofile
     except:
         if os.path.exists(ofile):
             os.remove(ofile)
+        if p and os.path.exists(p) and not cache_ro:
+            os.remove(p)
         raise
 
 
 def progress_urlretrieve(url, ofile):
-    print("Downloading %s ..." % url)
-    sys.stdout.flush()
+    logging.getLogger('download').info("Downloading %s to %s..." % (url, ofile))
     try:
         from progressbar import DataTransferBar, UnknownLength
         pbar = DataTransferBar()
@@ -126,6 +144,42 @@ def progress_urlretrieve(url, ofile):
         return _urlretrieve(url, ofile)
 
 
+def file_downloader(www_path, local_path, retry_max=5):
+    """A slightly better downloader: it tries more than once."""
+
+    retry_counter = 0
+    while retry_counter <= retry_max:
+        # Try to download
+        try:
+            retry_counter += 1
+            progress_urlretrieve(www_path, local_path)
+            # if no error, exit
+            break
+        except HTTPError as err:
+            # This works well for py3
+            if err.code == 404:
+                # Ok so this *should* be an ocean tile
+                return None
+            elif err.code >= 500 and err.code < 600:
+                print("Downloading %s failed with HTTP error %s, "
+                      "retrying in 10 seconds... %s/%s" %
+                      (www_path, err.code, retry_counter, retry_max))
+                time.sleep(10)
+                continue
+            else:
+                raise
+        except ContentTooShortError:
+            print("Downloading %s failed with ContentTooShortError"
+                  " error %s, retrying in 10 seconds... %s/%s" %
+                  (www_path, err.code, retry_counter, retry_max))
+            time.sleep(10)
+            continue
+
+    # See if we managed
+    if not os.path.exists(local_path):
+        raise RuntimeError('Downloading %s failed.' % www_path)
+
+
 def empty_cache():  # pragma: no cover
     """Empty oggm's cache directory."""
 
@@ -138,6 +192,21 @@ def expand_path(p):
     """Helper function for os.path.expanduser and os.path.expandvars"""
 
     return os.path.expandvars(os.path.expanduser(p))
+
+
+def del_empty_dirs(s_dir):
+    """Delete empty directories."""
+    b_empty = True
+    for s_target in os.listdir(s_dir):
+        s_path = os.path.join(s_dir, s_target)
+        if os.path.isdir(s_path):
+            if not del_empty_dirs(s_path):
+                b_empty = False
+        else:
+            b_empty = False
+    if b_empty:
+        os.rmdir(s_dir)
+    return b_empty
 
 
 class SuperclassMeta(type):
@@ -157,6 +226,39 @@ class SuperclassMeta(type):
         return cls
 
 
+class LRUFileCache():
+    """A least recently used cache for temporary files.
+
+    The files which are no longer used are deleted from the disk.
+    """
+    def __init__(self, l0=None, maxsize=100):
+        """Instanciate.
+
+        Parameters
+        ----------
+        l0 : list
+            a list of file paths
+        maxsize : int
+            the max number of files to keep
+        """
+        self.files = [] if l0 is None else l0
+        self.maxsize = maxsize
+        self.purge()
+
+    def purge(self):
+        """Remove expired entries."""
+        if len(self.files) > self.maxsize:
+            fpath = self.files.pop(0)
+            if os.path.exists(fpath):
+                os.remove(fpath)
+
+    def append(self, fpath):
+        """Append a file to the list."""
+        if fpath not in self.files:
+            self.files.append(fpath)
+        self.purge()
+
+
 def _download_oggm_files():
     with _get_download_lock():
         return _download_oggm_files_unlocked()
@@ -169,6 +271,7 @@ def _download_oggm_files_unlocked():
                      SAMPLE_DATA_GH_REPO
     master_zip_url = 'https://github.com/%s/archive/master.zip' % \
                      SAMPLE_DATA_GH_REPO
+    rename_output = False
     ofile = os.path.join(cfg.CACHE_DIR, 'oggm-sample-data.zip')
     shafile = os.path.join(cfg.CACHE_DIR, 'oggm-sample-data-commit.txt')
     odir = os.path.join(cfg.CACHE_DIR)
@@ -201,6 +304,10 @@ def _download_oggm_files_unlocked():
             # if not same, delete entire dir
             if local_sha != master_sha:
                 empty_cache()
+            # use sha based download url to avoid cache issues
+            master_zip_url = 'https://github.com/%s/archive/%s.zip' % \
+                (SAMPLE_DATA_GH_REPO, master_sha)
+            rename_output = "oggm-sample-data-%s" % master_sha
         except (HTTPError, URLError):
             master_sha = 'error'
     else:
@@ -227,9 +334,16 @@ def _download_oggm_files_unlocked():
         with open(shafile, 'w') as sfile:
             sfile.write(master_sha)
 
+    # rename dir in case of download from different url
+    sdir = os.path.join(cfg.CACHE_DIR, 'oggm-sample-data-master')
+    if rename_output:
+        fdir = os.path.join(cfg.CACHE_DIR, rename_output)
+        if os.path.exists(sdir):
+            shutil.rmtree(sdir)
+        shutil.move(fdir, sdir)
+
     # list of files for output
     out = dict()
-    sdir = os.path.join(cfg.CACHE_DIR, 'oggm-sample-data-master')
     for root, directories, filenames in os.walk(sdir):
         for filename in filenames:
             if filename in out:
@@ -253,45 +367,33 @@ def _download_srtm_file_unlocked(zone):
     """Checks if the srtm data is in the directory and if not, download it.
     """
 
-    odir = os.path.join(cfg.PATHS['topo_dir'], 'srtm')
-    mkdir(odir)
-    ofile = os.path.join(odir, 'srtm_' + zone + '.zip')
-#    ifile = 'http://srtm.csi.cgiar.org/SRT-ZIP/SRTM_V41/SRTM_Data_GeoTiff' \
-    ifile = 'http://droppr.org/srtm/v4.1/6_5x5_TIFs' \
-            '/srtm_' + zone + '.zip'
-    if not os.path.exists(ofile):
-        retry_counter = 0
-        retry_max = 5
-        while True:
-            # Try to download
-            try:
-                retry_counter += 1
-                progress_urlretrieve(ifile, ofile)
-                with zipfile.ZipFile(ofile) as zf:
-                    zf.extractall(odir)
-                break
-            except HTTPError as err:
-                # This works well for py3
-                if err.code == 404:
-                    # Ok so this *should* be an ocean tile
-                    return None
-                elif err.code >= 500 and err.code < 600 and \
-                         retry_counter <= retry_max:
-                    print("Downloading SRTM data failed with HTTP error %s, "
-                          "retrying in 10 seconds... %s/%s" %
-                          (err.code, retry_counter, retry_max))
-                    time.sleep(10)
-                    continue
-                else:
-                    raise
-            except zipfile.BadZipfile:
-                # This is for py2
-                # Ok so this *should* be an ocean tile
-                return None
+    # download directory
+    ddir = os.path.join(cfg.PATHS['topo_dir'], 'srtm', zone)
+    mkdir(ddir)
+    dfile = os.path.join(ddir, 'srtm_' + zone + '.zip')
+    # extract directory
+    tmpdir = os.path.join(cfg.PATHS['working_dir'], 'tmp')
+    mkdir(tmpdir)
+    outpath = os.path.join(tmpdir, 'srtm_' + zone + '.tif')
 
-    out = os.path.join(odir, 'srtm_' + zone + '.tif')
-    assert os.path.exists(out)
-    return out
+    # check if extracted file exists already
+    if os.path.exists(outpath):
+        return outpath
+
+    # Did we download it yet?
+    ifile = 'http://droppr.org/srtm/v4.1/6_5x5_TIFs/srtm_' + zone + '.zip'
+    if not os.path.exists(dfile):
+        # the file isn't downloaded yet
+        file_downloader(ifile, dfile)
+
+    # ok we have to extract it
+    with zipfile.ZipFile(dfile) as zf:
+        zf.extractall(tmpdir)
+
+    # See if we're good, don't overfill the tmp directory
+    assert os.path.exists(outpath)
+    cfg.get_lru_handler(tmpdir).append(outpath)
+    return outpath
 
 
 def _download_dem3_viewpano(zone):
@@ -300,18 +402,23 @@ def _download_dem3_viewpano(zone):
 
 
 def _download_dem3_viewpano_unlocked(zone):
-    """Checks if the srtm data is in the directory and if not, download it.
+    """Checks if the DEM3 data is in the directory and if not, download it.
     """
-    odir = os.path.join(cfg.PATHS['topo_dir'], 'dem3', zone)
 
-    mkdir(odir)
-    ofile = os.path.join(odir, 'dem3_' + zone + '.zip')
-    outpath = os.path.join(odir, zone+'.tif')
+    # download directory
+    ddir = os.path.join(cfg.PATHS['topo_dir'], 'dem3', zone)
+    mkdir(ddir)
+    dfile = os.path.join(ddir, 'dem3_' + zone + '.zip')
+    # extract directory
+    tmpdir = os.path.join(cfg.PATHS['working_dir'], 'tmp')
+    mkdir(tmpdir)
+    outpath = os.path.join(tmpdir, zone+'.tif')
 
-    # check if TIFF file exists already
+    # check if extracted file exists already
     if os.path.exists(outpath):
         return outpath
 
+    # OK, so see if downloaded already
     # some files have a newer version 'v2'
     if zone in ['R33', 'R34', 'R35', 'R36', 'R37', 'R38', 'Q32', 'Q33', 'Q34',
                 'Q35', 'Q36', 'Q37', 'Q38', 'Q39', 'Q40', 'P31', 'P32', 'P33',
@@ -322,42 +429,13 @@ def _download_dem3_viewpano_unlocked(zone):
     else:
         ifile = 'http://viewfinderpanoramas.org/dem3/' + zone + '.zip'
 
-    if not os.path.exists(ofile):
-        retry_counter = 0
-        retry_max = 5
-        while True:
-            # Try to download
-            try:
-                retry_counter += 1
-                progress_urlretrieve(ifile, ofile)
-                with zipfile.ZipFile(ofile) as zf:
-                    zf.extractall(odir)
-                break
-            except HTTPError as err:
-                # This works well for py3
-                if err.code == 404:
-                    # Ok so this *should* be an ocean tile
-                    return None
-                elif err.code >= 500 and err.code < 600 and  \
-                                retry_counter <= retry_max:
-                    print("Downloading DEM3 data failed with HTTP error %s, "
-                          "retrying in 10 seconds... %s/%s" %
-                          (err.code, retry_counter, retry_max))
-                    time.sleep(10)
-                    continue
-                else:
-                    raise
-            except ContentTooShortError:
-                print("Downloading DEM3 data failed with ContentTooShortError"
-                      " error %s, retrying in 10 seconds... %s/%s" %
-                      (err.code, retry_counter, retry_max))
-                time.sleep(10)
-                continue
+    if not os.path.exists(dfile):
+        # the file isn't downloaded yet
+        file_downloader(ifile, dfile)
 
-            except zipfile.BadZipfile:
-                # This is for py2
-                # Ok so this *should* be an ocean tile
-                return None
+    # ok we have to extract it
+    with zipfile.ZipFile(dfile) as zf:
+        zf.extractall(tmpdir)
 
     # Serious issue: sometimes, if a southern hemisphere URL is queried for
     # download and there is none, a NH zip file os downloaded.
@@ -366,14 +444,14 @@ def _download_dem3_viewpano_unlocked(zone):
     # the unzipped folder has the file name of
     # the northern hemisphere file. Some checks if correct file exists:
     if len(zone)==4 and zone.startswith('S'):
-        zonedir = os.path.join(odir, zone[1:])
+        zonedir = os.path.join(tmpdir, zone[1:])
     else:
-        zonedir = os.path.join(odir, zone)
+        zonedir = os.path.join(tmpdir, zone)
     globlist = glob.glob(os.path.join(zonedir, '*.hgt'))
 
     # take care of the special file naming cases
     if zone in DEM3REG.keys():
-        globlist = glob.glob(os.path.join(odir, '*', '*.hgt'))
+        globlist = glob.glob(os.path.join(tmpdir, '*', '*.hgt'))
 
     if not globlist:
         raise RuntimeError("We should have some files here, but we don't")
@@ -392,11 +470,14 @@ def _download_dem3_viewpano_unlocked(zone):
     with rasterio.open(outpath, 'w', **profile) as dst:
         dst.write(dest)
 
-    assert os.path.exists(outpath)
     # delete original files to spare disk space
     for s in globlist:
         os.remove(s)
+    del_empty_dirs(tmpdir)
 
+    # See if we're good, don't overfill the tmp directory
+    assert os.path.exists(outpath)
+    cfg.get_lru_handler(tmpdir).append(outpath)
     return outpath
 
 
@@ -416,27 +497,32 @@ def _download_aster_file_unlocked(zone, unit):
     Region is eu-west-1 and Output Format is json.
     """
 
-    odir = os.path.join(cfg.PATHS['topo_dir'], 'aster')
-    mkdir(odir)
+    # download directory
+    ddir = os.path.join(cfg.PATHS['topo_dir'], 'aster', zone)
+    mkdir(ddir)
     fbname = 'ASTGTM2_' + zone + '.zip'
     dirbname = 'UNIT_' + unit
-    ofile = os.path.join(odir, fbname)
+    dfile = os.path.join(ddir, fbname)
+    # extract directory
+    tmpdir = os.path.join(cfg.PATHS['working_dir'], 'tmp')
+    mkdir(tmpdir)
+    outpath = os.path.join(tmpdir, 'ASTGTM2_' + zone + '_dem.tif')
 
-    cmd = 'aws --region eu-west-1 s3 cp s3://astgtmv2/ASTGTM_V2/'
-    cmd = cmd + dirbname + '/' + fbname + ' ' + ofile
-    if not os.path.exists(ofile):
-        subprocess.call(cmd, shell=True)
-        if os.path.exists(ofile):
-            # Ok so the tile is a valid one
-            with zipfile.ZipFile(ofile) as zf:
-                zf.extractall(odir)
-        else:
-            # Ok so this *should* be an ocean tile
-            return None
+    aws_path = 'ASTGTM_V2/' + dirbname + '/' + fbname
+    _aws_file_download_unlocked(aws_path, dfile)
 
-    out = os.path.join(odir, 'ASTGTM2_' + zone + '_dem.tif')
-    assert os.path.exists(out)
-    return out
+    if os.path.exists(dfile):
+        # Ok so the tile is a valid one
+        with zipfile.ZipFile(dfile) as zf:
+            zf.extractall(outpath)
+    else:
+        # Ok so this *should* be an ocean tile
+        return None
+
+    # See if we're good, don't overfill the tmp directory
+    assert os.path.exists(outpath)
+    cfg.get_lru_handler(tmpdir).append(outpath)
+    return outpath
 
 
 def _download_alternate_topo_file(fname):
@@ -456,29 +542,27 @@ def _download_alternate_topo_file_unlocked(fname):
     Region is eu-west-1 and Output Format is json.
     """
 
-    fzipname = fname + '.zip'
-    # Here we had a file exists check
+    # download directory
+    ddir = os.path.join(cfg.PATHS['topo_dir'], 'alternate')
+    mkdir(ddir)
+    dfile = os.path.join(ddir, fname + '.zip')
+    # extract directory
+    tmpdir = os.path.join(cfg.PATHS['working_dir'], 'tmp')
+    mkdir(tmpdir)
+    outpath = os.path.join(tmpdir, fname)
 
-    odir = os.path.join(cfg.PATHS['topo_dir'], 'alternate')
-    mkdir(odir)
-    ofile = os.path.join(odir, fzipname)
+    aws_path = 'topo/' + fname + '.zip'
+    _aws_file_download_unlocked(aws_path, dfile)
 
-    cmd = 'aws --region eu-west-1 s3 cp s3://astgtmv2/topo/'
-    cmd = cmd + fzipname + ' ' + ofile
-    if not os.path.exists(ofile):
-        print('Downloading ' + fzipname + ' from AWS s3...')
-        subprocess.call(cmd, shell=True)
-        if os.path.exists(ofile):
-            # Ok so the tile is a valid one
-            with zipfile.ZipFile(ofile) as zf:
-                zf.extractall(odir)
-        else:
-            # Ok so this *should* be an ocean tile
-            return None
+    if not os.path.exists(outpath):
+        print('Extracting ' + fname + '.zip ...')
+        with zipfile.ZipFile(dfile) as zf:
+            zf.extractall(tmpdir)
 
-    out = os.path.join(odir, fname)
-    assert os.path.exists(out)
-    return out
+    # See if we're good, don't overfill the tmp directory
+    assert os.path.exists(outpath)
+    cfg.get_lru_handler(tmpdir).append(outpath)
+    return outpath
 
 
 def _get_centerline_lonlat(gdir):
@@ -518,15 +602,33 @@ def _aws_file_download_unlocked(aws_path, local_path, reset=False):
     reset: overwrite the local file
     """
 
+    while aws_path.startswith('/'):
+        aws_path = aws_path[1:]
+
     if reset and os.path.exists(local_path):
         os.remove(local_path)
 
-    cmd = 'aws --region eu-west-1 s3 cp s3://astgtmv2/'
-    cmd = cmd + aws_path + ' ' + local_path
-    if not os.path.exists(local_path):
-        subprocess.call(cmd, shell=True)
-    if not os.path.exists(local_path):
+    dpath = local_path
+    cache_dir = cfg.PATHS['dl_cache_dir']
+    cache_ro = cfg.PARAMS['dl_cache_readonly']
+    if cache_dir and os.path.isdir(cache_dir):
+        dpath = os.path.join(cache_dir, 'astgtmv2', aws_path)
+        if not os.path.exists(os.path.dirname(dpath)) and not cache_ro:
+            os.makedirs(os.path.dirname(dpath))
+        if cache_ro and not os.path.exists(dpath):
+            dpath = local_path
+
+    if not os.path.exists(dpath):
+        import boto3
+        client = boto3.client('s3')
+        logging.getLogger('download').info("Downloading %s from s3 to %s..." % (aws_path, dpath))
+        client.download_file('astgtmv2', aws_path, dpath)
+
+    if not os.path.exists(dpath):
         raise RuntimeError('Something went wrong with the download')
+
+    if dpath != local_path:
+        shutil.copyfile(dpath, local_path)
 
 
 def mkdir(path, reset=False):
@@ -1206,7 +1308,7 @@ def get_topo_file(lon_ex, lat_ex, rgi_region=None, source=None):
     more files, merge them.
 
     Returns a downloaded SRTM file for [-60S;60N], and
-    a corrected DEM3 from viewfinderpanoramas.org else
+    a corrected DEM3 from viewfinderpanoramas.org elsewhere.
 
     Parameters
     ----------
@@ -1247,7 +1349,6 @@ def get_topo_file(lon_ex, lat_ex, rgi_region=None, source=None):
             return cfg.PATHS['dem_file'], source
 
     # If not, do the job ourselves: download and merge stuffs
-    topodir = cfg.PATHS['topo_dir']
 
     # GIMP is in polar stereographic, not easy to test if glacier is on the map
     # It would be possible with a salem grid but this is a bit more expensive
@@ -1269,7 +1370,7 @@ def get_topo_file(lon_ex, lat_ex, rgi_region=None, source=None):
             gimp_file = _download_alternate_topo_file('AntarcticDEM_wgs84.tif')
             return gimp_file, source
 
-    # Anywhere else on Earth we chack for DEM3, ASTER, or SRTM
+    # Anywhere else on Earth we check for DEM3, ASTER, or SRTM
     if (np.min(lat_ex) < -60.) or (np.max(lat_ex) > 60.) or \
                     source == 'DEM3' or source == 'ASTER':
         # default is DEM3
@@ -1314,6 +1415,11 @@ def get_topo_file(lon_ex, lat_ex, rgi_region=None, source=None):
     if len(sources) == 1:
         return sources[0], source_str
     else:
+
+        # extract directory
+        tmpdir = os.path.join(cfg.PATHS['working_dir'], 'tmp')
+        mkdir(tmpdir)
+
         # merge
         zone_str = '+'.join(zones)
         bname = source_str.lower() + '_merged_' + zone_str + '.tif'
@@ -1323,8 +1429,7 @@ def get_topo_file(lon_ex, lat_ex, rgi_region=None, source=None):
             hash_object = hashlib.md5(bname.encode())
             bname = hash_object.hexdigest() + '.tif'
 
-        merged_file = os.path.join(topodir, source_str.lower(),
-                                   bname)
+        merged_file = os.path.join(tmpdir, bname)
         if not os.path.exists(merged_file):
             # check case where wrong zip file is downloaded from
             if all(x is None for x in sources):
@@ -1341,13 +1446,14 @@ def get_topo_file(lon_ex, lat_ex, rgi_region=None, source=None):
             profile['driver'] = 'GTiff'
             with rasterio.open(merged_file, 'w', **profile) as dst:
                 dst.write(dest)
+            cfg.get_lru_handler(tmpdir).append(merged_file)
         return merged_file, source_str + '_MERGED'
 
 
 def compile_run_output(gdirs, filesuffix=''):
-    """Merge the runs output of the glacier directories into one file. 
-    
-    
+    """Merge the runs output of the glacier directories into one file.
+
+
     Parameters
     ----------
     gdirs: the list of GlacierDir to process.
@@ -1868,7 +1974,7 @@ class GlacierDirectory(object):
         delete : bool
             delete the file if exists
         filesuffix : str
-            append a suffix to the filename (useful for model runs). Note 
+            append a suffix to the filename (useful for model runs). Note
             that the BASENAME remains same.
 
         Returns
