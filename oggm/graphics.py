@@ -46,6 +46,8 @@ def _plot_map(plotfunc):
     ----------
     ax : matplotlib axes object, optional
         If None, uses own axis
+    add_scalebar : Boolean, optional, default=True
+        Adds scale bar to the plot
     add_colorbar : Boolean, optional, default=True
         Adds colorbar to axis
     horizontal_colorbar : Boolean, optional, default=False
@@ -57,6 +59,12 @@ def _plot_map(plotfunc):
         add something to the default title. Set to none to remove default
     lonlat_contours_kwargs: dict, optional
         pass kwargs to salem.Map.set_lonlat_contours
+    cbar_ax: ax, optional
+        ax where to plot the colorbar
+    savefig : str, optional
+        save the figure to a file instead of displaying it
+    savefig_kwargs : dict, optional
+        the kwargs to plt.savefig
     """
 
     # Build on the original docstring
@@ -65,7 +73,8 @@ def _plot_map(plotfunc):
     @functools.wraps(plotfunc)
     def newplotfunc(gdir, ax=None, add_colorbar=True, title=None,
                     title_comment=None, horizontal_colorbar=False,
-                    lonlat_contours_kwargs=None,
+                    lonlat_contours_kwargs=None, cbar_ax=None,
+                    add_scalebar=True, savefig=None, savefig_kwargs=None,
                     **kwargs):
 
         dofig = False
@@ -78,14 +87,19 @@ def _plot_map(plotfunc):
         if lonlat_contours_kwargs is not None:
             mp.set_lonlat_contours(**lonlat_contours_kwargs)
 
+        if add_scalebar:
+            mp.set_scale_bar()
         out = plotfunc(gdir, ax=ax, salemmap=mp, **kwargs)
 
         if add_colorbar and 'cbar_label' in out:
             cbprim = out.get('cbar_primitive', mp)
-            if horizontal_colorbar:
-                cb = cbprim.append_colorbar(ax, "bottom", size="5%", pad=0.4)
+            if cbar_ax:
+                cb = cbprim.colorbarbase(cbar_ax)
             else:
-                cb = cbprim.append_colorbar(ax, "right", size="5%", pad=0.2)
+                if horizontal_colorbar:
+                    cb = cbprim.append_colorbar(ax, "bottom", size="5%", pad=0.4)
+                else:
+                    cb = cbprim.append_colorbar(ax, "right", size="5%", pad=0.2)
             cb.set_label(out['cbar_label'])
 
         if title is None:
@@ -106,6 +120,10 @@ def _plot_map(plotfunc):
 
         if dofig:
             plt.tight_layout()
+
+        if savefig is not None:
+            plt.savefig(savefig, savefig_kwargs=savefig_kwargs)
+            plt.close()
 
     return newplotfunc
 
@@ -159,16 +177,15 @@ def plot_domain(gdir, ax=None, salemmap=None):  # pragma: no cover
 
     crs = gdir.grid.center_grid
 
-    for i in gdir.divide_ids:
-        geom = gdir.read_pickle('geometries', div_id=i)
+    geom = gdir.read_pickle('geometries', div_id=0)
 
-        # Plot boundaries
-        poly_pix = geom['polygon_pix']
+    # Plot boundaries
+    poly_pix = geom['polygon_pix']
 
-        salemmap.set_geometry(poly_pix, crs=crs, fc='white',
-                         alpha=0.3, zorder=2, linewidth=.2)
-        for l in poly_pix.interiors:
-            salemmap.set_geometry(l, crs=crs,
+    salemmap.set_geometry(poly_pix, crs=crs, fc='white',
+                          alpha=0.3, zorder=2, linewidth=.2)
+    for l in poly_pix.interiors:
+        salemmap.set_geometry(l, crs=crs,
                               color='black', linewidth=0.5)
 
     salemmap.plot(ax)
@@ -211,6 +228,9 @@ def plot_centerlines(gdir, ax=None, salemmap=None, use_flowlines=False,
             salemmap.set_geometry(l, crs=crs,
                                  color='black', linewidth=0.5)
 
+        if add_downstream:
+            continue
+
         # plot Centerlines
         cls = gdir.read_pickle(filename, div_id=i)
 
@@ -228,14 +248,23 @@ def plot_centerlines(gdir, ax=None, salemmap=None, use_flowlines=False,
                                      markersize=40, edgecolor='k', alpha=0.8,
                                      zorder=99, facecolor='none')
 
-        if add_downstream:
-            line = gdir.read_pickle('downstream_line', div_id=i)
-            salemmap.set_geometry(line, crs=crs, color='red', linewidth=2.5,
-                                 zorder=50)
+    if add_downstream and not gdir.is_tidewater:
+        # plot Centerlines
+        cls = gdir.read_pickle(filename, div_id=0)
 
-            salemmap.set_geometry(shpg.Point(line.coords[0]), crs=crs,
-                                 marker='o', markersize=40, edgecolor='k',
-                                 alpha=0.8, zorder=99, facecolor='w')
+        # Go in reverse order for red always being the longuest
+        cls = cls[::-1]
+        color = gpd.plotting.gencolor(len(cls) + 1, colormap='Set1')
+        for l, c in zip(cls, color):
+            salemmap.set_geometry(l.line, crs=crs, color=c,
+                                 linewidth=2.5, zorder=50)
+            salemmap.set_geometry(l.head, crs=gdir.grid, marker='o',
+                                  markersize=60, alpha=0.8, color=c, zorder=99)
+
+            for j in l.inflow_points:
+                salemmap.set_geometry(j, crs=crs, marker='o',
+                                     markersize=40, edgecolor='k', alpha=0.8,
+                                     zorder=99, facecolor='none')
 
     salemmap.plot(ax)
 
@@ -312,6 +341,9 @@ def plot_catchment_width(gdir, ax=None, salemmap=None, corrected=False,
         if add_intersects and gdir.has_file('intersects', div_id=0):
             gdf = gpd.read_file(gdir.get_filepath('intersects', div_id=0))
             salemmap.set_shapefile(gdf, color='k', linewidth=3.5, zorder=3)
+        if add_intersects and gdir.has_file('divides_intersects', div_id=0):
+            gdf = gpd.read_file(gdir.get_filepath('divides_intersects'))
+            salemmap.set_shapefile(gdf, color='k', linewidth=3.5, zorder=3)
 
         # plot Centerlines
         cls = gdir.read_pickle('inversion_flowlines', div_id=i)[::-1]
@@ -322,10 +354,10 @@ def plot_catchment_width(gdir, ax=None, salemmap=None, corrected=False,
             if corrected:
                 for wi, cur, (n1, n2) in zip(l.widths, l.line.coords,
                                              l.normals):
-                    l = shpg.LineString([shpg.Point(cur + wi / 2. * n1),
+                    _l = shpg.LineString([shpg.Point(cur + wi / 2. * n1),
                                          shpg.Point(cur + wi / 2. * n2)])
 
-                    salemmap.set_geometry(l, crs=crs, color=c,
+                    salemmap.set_geometry(_l, crs=crs, color=c,
                                          linewidth=0.6, zorder=50)
             else:
                 for wl, wi in zip(l.geometrical_widths, l.widths):
@@ -350,7 +382,7 @@ def plot_catchment_width(gdir, ax=None, salemmap=None, corrected=False,
 
 @entity_task(log)
 @_plot_map
-def plot_inversion(gdir, ax=None, salemmap=None):
+def plot_inversion(gdir, ax=None, salemmap=None, linewidth=3, vmax=None):
     """Plots the result of the inversion out of a glacier directory."""
 
     with netCDF4.Dataset(gdir.get_filepath('gridded_data')) as nc:
@@ -387,11 +419,12 @@ def plot_inversion(gdir, ax=None, salemmap=None):
             vol.extend(c['volume'])
 
     cm = plt.cm.get_cmap('YlOrRd')
-    dl = salem.DataLevels(cmap=cm, nlevels=256, data=toplot_th, vmin=0)
+    dl = salem.DataLevels(cmap=cm, nlevels=256, data=toplot_th,
+                          vmin=0, vmax=vmax)
     colors = dl.to_rgb()
     for l, c in zip(toplot_lines, colors):
         salemmap.set_geometry(l, crs=crs, color=c,
-                             linewidth=3, zorder=50)
+                             linewidth=linewidth, zorder=50)
     salemmap.plot(ax)
 
     return dict(cbar_label='Section thickness [m]',
@@ -444,7 +477,8 @@ def plot_distributed_thickness(gdir, ax=None, salemmap=None, how=None):
 
 @entity_task(log)
 @_plot_map
-def plot_modeloutput_map(gdir, ax=None, salemmap=None, model=None, vmax=None):
+def plot_modeloutput_map(gdir, ax=None, salemmap=None, model=None, vmax=None,
+                         linewidth=3, subset=True):
     """Plots the result of the model output."""
 
     with netCDF4.Dataset(gdir.get_filepath('gridded_data')) as nc:
@@ -454,15 +488,19 @@ def plot_modeloutput_map(gdir, ax=None, salemmap=None, model=None, vmax=None):
     poly_pix = geom['polygon_pix']
 
     ds = salem.GeoDataset(gdir.grid)
-    mlines = shpg.GeometryCollection([l.line for l in model.fls] + [poly_pix])
-    ml = mlines.bounds
-    corners = ((ml[0], ml[1]), (ml[2], ml[3]))
 
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore",category=RuntimeWarning)
-        ds.set_subset(corners=corners, margin=10, crs=gdir.grid)
+    if subset:
+        mlines = shpg.GeometryCollection([l.line for l in model.fls] +
+                                         [poly_pix])
+        ml = mlines.bounds
+        corners = ((ml[0], ml[1]), (ml[2], ml[3]))
 
-    salemmap = salem.Map(ds.grid, countries=False, nx=gdir.grid.nx)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            ds.set_subset(corners=corners, margin=10, crs=gdir.grid)
+
+        salemmap = salem.Map(ds.grid, countries=False, nx=gdir.grid.nx)
+
     salemmap.set_topography(topo, crs=gdir.grid)
 
     crs = gdir.grid.center_grid
@@ -487,11 +525,12 @@ def plot_modeloutput_map(gdir, ax=None, salemmap=None, model=None, vmax=None):
             toplot_lines.append(l)
 
     cm = plt.cm.get_cmap('YlOrRd')
-    dl = salem.DataLevels(cmap=cm, nlevels=256, data=toplot_th, vmin=0, vmax=vmax)
+    dl = salem.DataLevels(cmap=cm, nlevels=256, data=toplot_th,
+                          vmin=0, vmax=vmax)
     colors = dl.to_rgb()
     for l, c in zip(toplot_lines, colors):
         salemmap.set_geometry(l, crs=crs, color=c,
-                          linewidth=3, zorder=50)
+                          linewidth=linewidth, zorder=50)
     salemmap.plot(ax)
 
     return dict(cbar_label='Section thickness [m]',
@@ -514,10 +553,14 @@ def plot_modeloutput_section(gdir, model=None, ax=None, title=''):
     # Compute area histo
     area = np.array([])
     height = np.array([])
+    bed = np.array([])
     for cls in model.fls:
-        area = np.concatenate((area, cls.widths_m * cls.dx_meter * 1e-6))
+        a = cls.widths_m * cls.dx_meter * 1e-6
+        a = np.where(cls.thick>0, a, 0)
+        area = np.concatenate((area, a))
         height = np.concatenate((height, cls.surface_h))
-    ylim = [height.min(), height.max()]
+        bed = np.concatenate((bed, cls.bed_h))
+    ylim = [bed.min(), height.max()]
 
     # Plot histo
     posax = ax.get_position()

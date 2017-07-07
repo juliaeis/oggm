@@ -127,7 +127,7 @@ class LinearMassBalanceModel(MassBalanceModel):
         ela_h: float
             Equilibrium line altitude (units: [m])
         grad: float
-            Mass-balance gradient (unit: [mm yr-1 m-1])
+            Mass-balance gradient (unit: [mm ice yr-1 m-1])
         """
         self.orig_ela_h = ela_h
         self.ela_h = ela_h
@@ -142,7 +142,7 @@ class LinearMassBalanceModel(MassBalanceModel):
 
     def get_monthly_mb(self, heights, year=None):
         mb = (heights - self.ela_h) * self.grad
-        return mb / SEC_IN_YEAR / 1000.
+        return mb / SEC_IN_YEAR / cfg.RHO
 
     def get_annual_mb(self, heights, year=None):
         return self.get_monthly_mb(heights, year=year)
@@ -271,9 +271,8 @@ class PastMassBalanceModel(MassBalanceModel):
         fac = np.clip(fac, 0, 1)
         prcpsol *= fac
 
-        mb_annual = np.sum(prcpsol - self.mu_star * temp2dformelt, axis=1) \
-                    - self.bias
-        return mb_annual / SEC_IN_YEAR / cfg.RHO
+        mb_annual = np.sum(prcpsol - self.mu_star * temp2dformelt, axis=1)
+        return (mb_annual - self.bias) / SEC_IN_YEAR / cfg.RHO
 
 
 class ConstantMassBalanceModel(MassBalanceModel):
@@ -314,11 +313,9 @@ class ConstantMassBalanceModel(MassBalanceModel):
             y0 = df['t_star'][0]
 
         # This is a quick'n dirty optimisation
-        fls = gdir.read_pickle('model_flowlines')
-        hbins = np.array([])
-        for fl in fls:
-            hbins = np.append(hbins, fl.surface_h)
-        self.hbins = np.arange(np.min(hbins)-50, np.max(hbins)+500, step=5)
+        with netCDF4.Dataset(gdir.get_filepath('gridded_data')) as nc:
+            zminmax = [nc.min_h_dem-50, nc.max_h_dem+500]
+        self.hbins = np.arange(*zminmax, step=5)
         self.years = np.arange(y0-halfsize, y0+halfsize+1)
 
     @MassBalanceModel.temp_bias.setter

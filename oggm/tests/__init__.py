@@ -7,6 +7,7 @@ import socket
 import unittest
 import logging
 import matplotlib
+import matplotlib.ft2font
 import pandas as pd
 import geopandas as gpd
 import numpy as np
@@ -18,10 +19,6 @@ from oggm import cfg
 # Defaults
 logging.basicConfig(format='%(asctime)s: %(name)s: %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S', level=logging.DEBUG)
-
-# test dirs
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-TESTDIR_BASE = os.path.join(CURRENT_DIR, 'tmp')
 
 # Some logic to see which environment we are running on
 
@@ -35,7 +32,12 @@ HAS_MPL_FOR_TESTS = False
 if LooseVersion(matplotlib.__version__) >= LooseVersion('2'):
     HAS_MPL_FOR_TESTS = True
     BASELINE_DIR = os.path.join(cfg.CACHE_DIR, 'oggm-sample-data-master',
-                                'baseline_images', '2.0.x')
+                                'baseline_images')
+    ftver = LooseVersion(matplotlib.ft2font.__freetype_version__)
+    if ftver >= LooseVersion('2.7.0'):
+        BASELINE_DIR = os.path.join(BASELINE_DIR, 'alt')
+    else:
+        BASELINE_DIR = os.path.join(BASELINE_DIR, '2.0.x')
 
 
 # Some control on which tests to run (useful to avoid too long tests)
@@ -65,7 +67,7 @@ if os.environ.get('TRAVIS') is not None:
     else:
         # distribute the tests
         RUN_SLOW_TESTS = True
-        env = os.environ.get('OGGM_ENV')
+        env = os.environ.get('OGGM_TEST_ENV')
         if env == 'prepro':
             RUN_PREPRO_TESTS = True
             RUN_MODEL_TESTS = False
@@ -135,51 +137,21 @@ def is_download(test):
     msg = "requires explicit environment for download tests"
     return test if RUN_DOWNLOAD_TESTS else unittest.skip(msg)(test)
 
+
+def is_graphic_test(test):
+    # Test decorator
+    msg = "requires explicit environment for gaphic tests"
+    return test if RUN_GRAPHIC_TESTS else unittest.skip(msg)(test)
+
+
 def is_performance_test(test):
     # Test decorator
     msg = "requires explicit environment for performance tests"
     return test if RUN_PERFORMANCE_TESTS else unittest.skip(msg)(test)
 
-# the code below is copy/pasted from xarray
-# TODO: go back to xarray when https://github.com/pydata/xarray/issues/754
-def assertEqual(a1, a2):
-    assert a1 == a2 or (a1 != a1 and a2 != a2)
 
-
-def decode_string_data(data):
-    if data.dtype.kind == 'S':
-        return np.core.defchararray.decode(data, 'utf-8', 'replace')
-
-
-def data_allclose_or_equiv(arr1, arr2, rtol=1e-05, atol=1e-08):
-    from xarray.core import ops
-
-    if any(arr.dtype.kind == 'S' for arr in [arr1, arr2]):
-        arr1 = decode_string_data(arr1)
-        arr2 = decode_string_data(arr2)
-    exact_dtypes = ['M', 'm', 'O', 'U']
-    if any(arr.dtype.kind in exact_dtypes for arr in [arr1, arr2]):
-        return ops.array_equiv(arr1, arr2)
-    else:
-        return ops.allclose_or_equiv(arr1, arr2, rtol=rtol, atol=atol)
-
-
-def assertVariableAllClose(v1, v2, rtol=1e-05, atol=1e-08):
-    assertEqual(v1.dims, v2.dims)
-    allclose = data_allclose_or_equiv(
-        v1.values, v2.values, rtol=rtol, atol=atol)
-    assert allclose, (v1.values, v2.values)
-
-
-def assertDatasetAllClose(d1, d2, rtol=1e-05, atol=1e-08):
-    assertEqual(sorted(d1, key=str), sorted(d2, key=str))
-    for k in d1:
-        v1 = d1.variables[k]
-        v2 = d2.variables[k]
-        assertVariableAllClose(v1, v2, rtol=rtol, atol=atol)
-
-
-def init_hef(reset=False, border=40, invert_with_sliding=True):
+def init_hef(reset=False, border=40, invert_with_sliding=True,
+             invert_with_rectangular=True):
 
     from oggm.core.preprocessing import gis, centerlines, geometry
     from oggm.core.preprocessing import climate, inversion
@@ -188,9 +160,11 @@ def init_hef(reset=False, border=40, invert_with_sliding=True):
     from oggm.utils import get_demo_file
 
     # test directory
-    testdir = TESTDIR_BASE + '_border{}'.format(border)
+    testdir = os.path.join(cfg.PATHS['test_dir'], 'tmp_border{}'.format(border))
     if not invert_with_sliding:
         testdir += '_withoutslide'
+    if not invert_with_rectangular:
+        testdir += '_withoutrectangular'
     if not os.path.exists(testdir):
         os.makedirs(testdir)
         reset = True
@@ -200,6 +174,7 @@ def init_hef(reset=False, border=40, invert_with_sliding=True):
     cfg.PATHS['dem_file'] = get_demo_file('hef_srtm.tif')
     cfg.PATHS['climate_file'] = get_demo_file('histalp_merged_hef.nc')
     cfg.PARAMS['border'] = border
+    cfg.PARAMS['use_optimized_inversion_params'] = True
 
     hef_file = get_demo_file('Hintereisferner_RGI5.shp')
     entity = gpd.GeoDataFrame.from_file(hef_file).iloc[0]
@@ -217,6 +192,7 @@ def init_hef(reset=False, border=40, invert_with_sliding=True):
     centerlines.compute_centerlines(gdir)
     centerlines.compute_downstream_lines(gdir)
     geometry.initialize_flowlines(gdir)
+    centerlines.compute_downstream_bedshape(gdir)
     geometry.catchment_area(gdir)
     geometry.catchment_intersections(gdir)
     geometry.catchment_width_geom(gdir)
@@ -229,7 +205,8 @@ def init_hef(reset=False, border=40, invert_with_sliding=True):
                                      bias=res['bias'][-1],
                                      prcp_fac=res['prcp_fac'])
 
-    inversion.prepare_for_inversion(gdir)
+    inversion.prepare_for_inversion(gdir, add_debug_var=True,
+                                    invert_with_rectangular=invert_with_rectangular)
     ref_v = 0.573 * 1e9
 
     if invert_with_sliding:
@@ -238,8 +215,8 @@ def init_hef(reset=False, border=40, invert_with_sliding=True):
             _fd = 1.9e-24 * x[0]
             glen_a = (cfg.N+2) * _fd / 2.
             fs = 5.7e-20 * x[1]
-            v, _ = inversion.invert_parabolic_bed(gdir, fs=fs,
-                                                  glen_a=glen_a)
+            v, _ = inversion.mass_conservation_inversion(gdir, fs=fs,
+                                                         glen_a=glen_a)
             return (v - ref_v)**2
 
         out = optimization.minimize(to_optimize, [1, 1],
@@ -248,14 +225,14 @@ def init_hef(reset=False, border=40, invert_with_sliding=True):
         _fd = 1.9e-24 * out[0]
         glen_a = (cfg.N+2) * _fd / 2.
         fs = 5.7e-20 * out[1]
-        v, _ = inversion.invert_parabolic_bed(gdir, fs=fs,
-                                              glen_a=glen_a,
-                                              write=True)
+        v, _ = inversion.mass_conservation_inversion(gdir, fs=fs,
+                                                     glen_a=glen_a,
+                                                     write=True)
     else:
         def to_optimize(x):
             glen_a = cfg.A * x[0]
-            v, _ = inversion.invert_parabolic_bed(gdir, fs=0.,
-                                                  glen_a=glen_a)
+            v, _ = inversion.mass_conservation_inversion(gdir, fs=0.,
+                                                         glen_a=glen_a)
             return (v - ref_v)**2
 
         out = optimization.minimize(to_optimize, [1],
@@ -263,9 +240,9 @@ def init_hef(reset=False, border=40, invert_with_sliding=True):
                                     tol=1e-4)['x']
         glen_a = cfg.A * out[0]
         fs = 0.
-        v, _ = inversion.invert_parabolic_bed(gdir, fs=fs,
-                                              glen_a=glen_a,
-                                              write=True)
+        v, _ = inversion.mass_conservation_inversion(gdir, fs=fs,
+                                                     glen_a=glen_a,
+                                                     write=True)
     d = dict(fs=fs, glen_a=glen_a)
     d['factor_glen_a'] = out[0]
     try:
@@ -273,6 +250,9 @@ def init_hef(reset=False, border=40, invert_with_sliding=True):
     except IndexError:
         d['factor_fs'] = 0.
     gdir.write_pickle(d, 'inversion_params')
+
+    # filter
+    inversion.filter_inversion_output(gdir)
 
     inversion.distribute_thickness(gdir, how='per_altitude',
                                    add_nc_name=True)

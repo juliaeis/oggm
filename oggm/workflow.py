@@ -33,15 +33,26 @@ def _init_pool_globals(_cfg_contents, global_lock):
     utils.lock = global_lock
 
 
-def _init_pool():
-    """Necessary because at import time, cfg might be unitialized"""
+def init_mp_pool(reset=False):
+    """Necessary because at import time, cfg might be uninitialized"""
     global _mp_pool
-    if _mp_pool:
+    if _mp_pool and not reset:
         return _mp_pool
     cfg_contents = cfg.pack_config()
     global_lock = mp.Manager().Lock()
     mpp = cfg.PARAMS['mp_processes']
-    mpp = None if mpp == -1 else mpp
+    if mpp == -1:
+        try:
+            mpp = int(os.environ['SLURM_JOB_CPUS_PER_NODE'])
+            log.info('Multiprocessing: using slurm allocated '
+                     'processors (N={})'.format(mpp))
+        except KeyError:
+            mpp = mp.cpu_count()
+            log.info('Multiprocessing: using all available '
+                     'processors (N={})'.format(mpp))
+    else:
+        log.info('Multiprocessing: using the requested number of '
+                 'processors (N={})'.format(mpp))
     _mp_pool = mp.Pool(mpp, initializer=_init_pool_globals,
                        initargs=(cfg_contents, global_lock))
     return _mp_pool
@@ -64,12 +75,21 @@ class _pickle_copier(object):
         self.out_kwargs = kwargs
 
     def __call__(self, gdir):
-        if isinstance(gdir, collections.Sequence):
-            gdir, gdir_kwargs = gdir
-            gdir_kwargs = _merge_dicts(self.out_kwargs, gdir_kwargs)
-            return self.call_func(gdir, **gdir_kwargs)
-        else:
-            return self.call_func(gdir, **self.out_kwargs)
+        try:
+            if isinstance(gdir, collections.Sequence):
+                gdir, gdir_kwargs = gdir
+                gdir_kwargs = _merge_dicts(self.out_kwargs, gdir_kwargs)
+                return self.call_func(gdir, **gdir_kwargs)
+            else:
+                return self.call_func(gdir, **self.out_kwargs)
+        except Exception as e:
+            try:
+                err_msg = '{0}: exception occured while processing task ' \
+                          '{1}'.format(gdir.rgi_id, self.call_func.__name__)
+                raise RuntimeError(err_msg) from e
+            except AttributeError:
+                pass
+            raise
 
 
 def reset_multiprocessing():
@@ -91,13 +111,13 @@ def execute_entity_task(task, gdirs, **kwargs):
 
     Parameters
     ----------
-    task: function
-        the entity task to apply
-    gdirs: list
-        the list of oggm.GlacierDirectory to process
-        optionally, each list element can be a tuple, with the first element being
-        the oggm.GlacierDirectory, and the second element a dict that will be passed
-        to the task function as **kwargs.
+    task : function
+         the entity task to apply
+    gdirs : list
+         the list of oggm.GlacierDirectory to process.
+         Optionally, each list element can be a tuple, with the first element 
+         being the ``oggm.GlacierDirectory``, and the second element a dict that
+         will be passed to the task function as ``**kwargs``.
     """
 
     if task.__dict__.get('global_task', False):
@@ -111,7 +131,7 @@ def execute_entity_task(task, gdirs, **kwargs):
             return
 
     if cfg.PARAMS['use_multiprocessing']:
-        mppool = _init_pool()
+        mppool = init_mp_pool()
         mppool.map(pc, gdirs, chunksize=1)
     else:
         for gdir in gdirs:
@@ -153,8 +173,10 @@ def gis_prepro_tasks(gdirs):
         tasks.glacier_masks,
         tasks.compute_centerlines,
         tasks.compute_downstream_lines,
-        tasks.catchment_area,
         tasks.initialize_flowlines,
+        tasks.compute_downstream_bedshape,
+        tasks.catchment_area,
+        tasks.catchment_intersections,
         tasks.catchment_width_geom,
         tasks.catchment_width_correction
     ]
@@ -190,3 +212,6 @@ def inversion_tasks(gdirs):
 
     # Inversion for all glaciers
     execute_entity_task(tasks.volume_inversion, gdirs)
+
+    # Filter
+    execute_entity_task(tasks.filter_inversion_output, gdirs)
