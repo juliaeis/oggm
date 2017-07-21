@@ -653,6 +653,35 @@ def mkdir(path, reset=False):
         os.makedirs(path)
 
 
+def include_patterns(*patterns):
+    """Factory function that can be used with copytree() ignore parameter.
+
+    Arguments define a sequence of glob-style patterns
+    that are used to specify what files to NOT ignore.
+    Creates and returns a function that determines this for each directory
+    in the file hierarchy rooted at the source directory when used with
+    shutil.copytree().
+
+    https://stackoverflow.com/questions/35155382/copying-specific-files-to-a-
+    new-folder-while-maintaining-the-original-subdirect
+    """
+
+    def _ignore_patterns(path, names):
+        # This is our cuisine
+        bname = os.path.basename(path)
+        if 'divide' in bname or 'log' in bname:
+            keep = []
+        else:
+            keep = set(name for pattern in patterns
+                       for name in fnmatch.filter(names, pattern))
+        ignore = set(name for name in names
+                     if name not in keep and not
+                     os.path.isdir(os.path.join(path, name)))
+        return ignore
+
+    return _ignore_patterns
+
+
 def query_yes_no(question, default="yes"):
     """Ask a yes/no question via raw_input() and return their answer.
 
@@ -817,6 +846,22 @@ def line_interpol(line, dx):
         pbs = pref.buffer(dx).boundary.intersection(line)
         if pbs.type == 'Point':
             pbs = [pbs]
+        elif pbs.type == 'LineString':
+            # This is rare
+            pbs = [shpg.Point(c) for c in pbs.coords]
+            assert len(pbs) == 2
+        elif pbs.type == 'GeometryCollection':
+            # This is rare
+            opbs = []
+            for p in pbs:
+                if p.type == 'Point':
+                    opbs.append(p)
+                elif p.type == 'LineString':
+                    opbs.extend([shpg.Point(c) for c in p.coords])
+            pbs = opbs
+        else:
+            assert pbs.type == 'MultiPoint'
+
         # Out of the point(s) that we get, take the one farthest from the top
         refdis = line.project(pref)
         tdis = np.array([line.project(pb) for pb in pbs])
@@ -968,8 +1013,8 @@ def year_to_date(yr):
     try:
         sec, out_y = math.modf(yr)
         out_y = int(out_y)
-        sec = sec * SEC_IN_YEAR
-        out_m = np.nonzero(sec <= CUMSEC_IN_MONTHS)[0][0] + 1
+        sec = round(sec * SEC_IN_YEAR)
+        out_m = np.nonzero(sec < CUMSEC_IN_MONTHS)[0][0] + 1
     except TypeError:
         # TODO: inefficient but no time right now
         out_y = np.zeros(len(yr), np.int64)
@@ -990,7 +1035,7 @@ def date_to_year(y, m):
     return y + BEGINSEC_IN_MONTHS[ids] / SEC_IN_YEAR
 
 
-def monthly_timeseries(y0, y1=None, ny=None):
+def monthly_timeseries(y0, y1=None, ny=None, include_last_year=False):
     """Creates a monthly timeseries in units of floating years.
     """
 
@@ -1002,7 +1047,10 @@ def monthly_timeseries(y0, y1=None, ny=None):
         raise ValueError("Need at least two positional arguments.")
     months = np.tile(np.arange(12)+1, len(years))
     years = years.repeat(12)
-    return date_to_year(years, months)
+    out = date_to_year(years, months)
+    if not include_last_year:
+        out = out[:-11]
+    return out
 
 
 @MEMORY.cache
@@ -1347,10 +1395,10 @@ def _get_rgi_dir_unlocked():
         raise ValueError('The RGI data directory has to be'
                          'specified explicitly.')
     rgi_dir = os.path.abspath(os.path.expanduser(rgi_dir))
+    rgi_dir = os.path.join(rgi_dir, 'RGIV5')
     mkdir(rgi_dir)
 
-    bname = 'rgi50.zip'
-    dfile = 'http://www.glims.org/RGI/rgi50_files/' + bname
+    dfile = 'http://www.glims.org/RGI/rgi50_files/rgi50.zip'
     test_file = os.path.join(rgi_dir, '000_rgi50_manifest.txt')
 
     if not os.path.exists(test_file):
@@ -1371,6 +1419,46 @@ def _get_rgi_dir_unlocked():
                 # delete the zipfile after success
                 os.remove(zfile)
     return rgi_dir
+
+
+def get_rgi_intersects_dir():
+    """Returns a path to the RGI directory containing the intersects.
+
+    If the files are not present, download them.
+
+    Returns
+    -------
+    path to the directory
+    """
+
+    with _get_download_lock():
+        return _get_rgi_intersects_dir_unlocked()
+
+
+def _get_rgi_intersects_dir_unlocked():
+
+    rgi_dir = cfg.PATHS['rgi_dir']
+
+    # Be sure the user gave a sensible path to the RGI dir
+    if not rgi_dir:
+        raise ValueError('The RGI data directory has to be'
+                         'specified explicitly.')
+
+    rgi_dir = os.path.abspath(os.path.expanduser(rgi_dir))
+    mkdir(rgi_dir)
+
+    dfile = ('https://dl.dropboxusercontent.com/u/20930277/OGGM_Public/' +
+             'RGI_V5_Intersects.zip')
+    test_file = os.path.join(rgi_dir, 'RGI_V5_Intersects',
+                             'Intersects_OGGM_Manifest.txt')
+
+    if not os.path.exists(test_file):
+        # if not there download it
+        ofile = file_downloader(dfile)
+        # Extract root
+        with zipfile.ZipFile(ofile) as zf:
+            zf.extractall(rgi_dir)
+    return os.path.join(rgi_dir, 'RGI_V5_Intersects')
 
 
 def get_cru_file(var=None):
@@ -1533,17 +1621,17 @@ def get_topo_file(lon_ex, lat_ex, rgi_region=None, source=None):
                            'lon:{1}!'.format(lat_ex, lon_ex))
 
 
-def compile_run_output(gdirs, path=True, filesuffix=''):
+def compile_run_output(gdirs, path=True, monthly=False, filesuffix=''):
     """Merge the runs output of the glacier directories into one file.
 
 
     Parameters
     ----------
     gdirs: the list of GlacierDir to process.
+    path: where to store (default is on the working dir).
+    monthly: wether to store monthly values (default is yearly)
     filesuffix: the filesuffix of the run
     """
-
-    from oggm.core.models import flowline
 
     # Get the dimensions of all this
     rgi_ids = [gd.rgi_id for gd in gdirs]
@@ -1554,31 +1642,42 @@ def compile_run_output(gdirs, path=True, filesuffix=''):
         if i >= len(gdirs):
             raise RuntimeError('Found no valid glaciers!')
         try:
-            ppath = gdirs[i].get_filepath('past_model', filesuffix=filesuffix)
-            with flowline.FileModel(ppath) as model:
-                ts = model.volume_km3_ts()
-            time = ts.index
-            year, month = year_to_date(time)
+            ppath = gdirs[i].get_filepath('model_diagnostics',
+                                          filesuffix=filesuffix)
+            with xr.open_dataset(ppath) as ds_diag:
+                time = ds_diag.time.values
+                year = ds_diag.year.values
+                month = ds_diag.month.values
             break
         except:
             i += 1
 
+    # Monthly or not
+    if monthly:
+        pkeep = np.ones(len(time), dtype=np.bool)
+    else:
+        pkeep = np.where(month == 1)
+
+    time = time[pkeep]
+    year = year[pkeep]
+    month = month[pkeep]
     ds = xr.Dataset(coords={'time': ('time', time),
                             'year': ('time', year),
                             'month': ('time', month),
                             'rgi_id': ('rgi_id', rgi_ids)
                             })
-    shape = (len(ts), len(rgi_ids))
+    shape = (len(time), len(rgi_ids))
     vol = np.zeros(shape)
     area = np.zeros(shape)
     length = np.zeros(shape)
     for i, gdir in enumerate(gdirs):
         try:
-            ppath = gdir.get_filepath('past_model', filesuffix=filesuffix)
-            with flowline.FileModel(ppath) as model:
-                vol[:, i] = model.volume_m3_ts().values
-                area[:, i] = model.area_m2_ts().values
-                length[:, i] = model.length_m_ts().values
+            ppath = gdir.get_filepath('model_diagnostics',
+                                      filesuffix=filesuffix)
+            with xr.open_dataset(ppath) as ds_diag:
+                vol[:, i] = ds_diag.volume_m3.values[pkeep]
+                area[:, i] = ds_diag.area_m2.values[pkeep]
+                length[:, i] = ds_diag.length_m.values[pkeep]
         except:
             vol[:, i] = np.NaN
             area[:, i] = np.NaN
@@ -1600,8 +1699,6 @@ def compile_run_output(gdirs, path=True, filesuffix=''):
                                 'run_output' + filesuffix + '.nc')
         ds.to_netcdf(path)
     return ds
-
-
 
 
 def glacier_characteristics(gdirs, filesuffix='', path=True):
@@ -1627,7 +1724,7 @@ def glacier_characteristics(gdirs, filesuffix='', path=True):
 
         d = OrderedDict()
 
-        # Easy stats
+        # Easy stats - this should always be possible
         d['rgi_id'] = gdir.rgi_id
         d['name'] = gdir.name
         d['cenlon'] = gdir.cenlon
@@ -1636,113 +1733,112 @@ def glacier_characteristics(gdirs, filesuffix='', path=True):
         d['glacier_type'] = gdir.glacier_type
         d['terminus_type'] = gdir.terminus_type
 
-        # Masks related stuff
-        if gdir.has_file('gridded_data', div_id=0):
-            fpath = gdir.get_filepath('gridded_data', div_id=0)
-            with netCDF4.Dataset(fpath) as nc:
-                mask = nc.variables['glacier_mask'][:]
-                topo = nc.variables['topo'][:]
-            d['dem_mean_elev'] = np.mean(topo[np.where(mask == 1)])
-            d['dem_max_elev'] = np.max(topo[np.where(mask == 1)])
-            d['dem_min_elev'] = np.min(topo[np.where(mask == 1)])
-
-        # Divides
-        d['n_divides'] = len(list(gdir.divide_ids))
-
-        # Very bad folders sometimes
+        # The rest is less certain. We put this in a try block and see
         try:
-            gdir.has_file('centerlines', div_id=1)
-        except IndexError:
-            out_df.append(d)
-            continue
+            # Masks related stuff
+            if gdir.has_file('gridded_data', div_id=0):
+                fpath = gdir.get_filepath('gridded_data', div_id=0)
+                with netCDF4.Dataset(fpath) as nc:
+                    mask = nc.variables['glacier_mask'][:]
+                    topo = nc.variables['topo'][:]
+                d['dem_mean_elev'] = np.mean(topo[np.where(mask == 1)])
+                d['dem_max_elev'] = np.max(topo[np.where(mask == 1)])
+                d['dem_min_elev'] = np.min(topo[np.where(mask == 1)])
 
-        # Centerlines
-        if gdir.has_file('centerlines', div_id=1):
-            cls = []
-            for i in gdir.divide_ids:
-                cls.extend(gdir.read_pickle('centerlines', div_id=i))
-            longuest = 0.
-            for cl in cls:
-                longuest = np.max([longuest, cl.dis_on_line[-1]])
-            d['n_centerlines'] = len(cls)
-            d['longuest_centerline_km'] = longuest * gdir.grid.dx / 1000.
+            # Divides
+            d['n_divides'] = len(list(gdir.divide_ids))
 
-        # MB and flowline related stuff
-        if gdir.has_file('inversion_flowlines', div_id=1):
-            amb = np.array([])
-            h = np.array([])
-            widths = np.array([])
-            slope = np.array([])
+            # Centerlines
+            if gdir.has_file('centerlines', div_id=1):
+                cls = []
+                for i in gdir.divide_ids:
+                    cls.extend(gdir.read_pickle('centerlines', div_id=i))
+                longuest = 0.
+                for cl in cls:
+                    longuest = np.max([longuest, cl.dis_on_line[-1]])
+                d['n_centerlines'] = len(cls)
+                d['longuest_centerline_km'] = longuest * gdir.grid.dx / 1000.
 
-            for div_id in gdir.divide_ids:
-                fls = gdir.read_pickle('inversion_flowlines', div_id=div_id)
-                dx = fls[0].dx * gdir.grid.dx
-                for fl in fls:
-                    amb = np.append(amb, fl.apparent_mb)
-                    hgt = fl.surface_h
-                    h = np.append(h, hgt)
-                    widths = np.append(widths, fl.widths * dx)
-                    slope = np.append(slope, np.arctan(-np.gradient(hgt, dx)))
+            # MB and flowline related stuff
+            if gdir.has_file('inversion_flowlines', div_id=1):
+                amb = np.array([])
+                h = np.array([])
+                widths = np.array([])
+                slope = np.array([])
 
-            pacc = np.where(amb >= 0)
-            pab = np.where(amb < 0)
-            d['aar'] = np.sum(widths[pacc]) / np.sum(widths[pab])
-            try:
-                # Try to get the slope
-                mb_slope, _, _, _, _ = stats.linregress(h[pab], amb[pab])
-                d['mb_grad'] = mb_slope
-            except:
-                # we don't mind if something goes wrong
-                d['mb_grad'] = np.NaN
-            d['avg_width'] = np.mean(widths)
-            d['avg_slope'] = np.mean(slope)
+                for div_id in gdir.divide_ids:
+                    fls = gdir.read_pickle('inversion_flowlines',
+                                           div_id=div_id)
+                    dx = fls[0].dx * gdir.grid.dx
+                    for fl in fls:
+                        amb = np.append(amb, fl.apparent_mb)
+                        hgt = fl.surface_h
+                        h = np.append(h, hgt)
+                        widths = np.append(widths, fl.widths * dx)
+                        slope = np.append(slope,
+                                          np.arctan(-np.gradient(hgt, dx)))
 
-        # Climate
-        if gdir.has_file('climate_monthly', div_id=0):
-            with xr.open_dataset(gdir.get_filepath('climate_monthly')) as cds:
-                d['clim_alt'] = cds.ref_hgt
-                t = cds.temp.mean(dim='time').values
-                if 'dem_mean_elev' in d:
-                    t = t - (d['dem_mean_elev'] - d['clim_alt']) * \
-                        cfg.PARAMS['temp_default_gradient']
-                else:
-                    t = np.NaN
-                d['clim_temp_avgh'] = t
-                d['clim_prcp'] = cds.prcp.mean(dim='time').values * 12
+                pacc = np.where(amb >= 0)
+                pab = np.where(amb < 0)
+                d['aar'] = np.sum(widths[pacc]) / np.sum(widths[pab])
+                try:
+                    # Try to get the slope
+                    mb_slope, _, _, _, _ = stats.linregress(h[pab], amb[pab])
+                    d['mb_grad'] = mb_slope
+                except:
+                    # we don't mind if something goes wrong
+                    d['mb_grad'] = np.NaN
+                d['avg_width'] = np.mean(widths)
+                d['avg_slope'] = np.mean(slope)
 
-        # Inversion
-        if gdir.has_file('inversion_output', div_id=1):
-            vol = []
-            for i in gdir.divide_ids:
-                cl = gdir.read_pickle('inversion_output', div_id=i)
-                for c in cl:
-                    vol.extend(c['volume'])
-            d['inv_volume_km3'] = np.nansum(vol) * 1e-9
-            area = gdir.rgi_area_km2
-            d['inv_thickness_m'] = d['inv_volume_km3'] / area * 1000
-            d['vas_volume_km3'] = 0.034*(area**1.375)
-            d['vas_thickness_m'] = d['vas_volume_km3'] / area * 1000
+            # Climate
+            if gdir.has_file('climate_monthly', div_id=0):
+                cf = gdir.get_filepath('climate_monthly')
+                with xr.open_dataset(cf) as cds:
+                    d['clim_alt'] = cds.ref_hgt
+                    t = cds.temp.mean(dim='time').values
+                    if 'dem_mean_elev' in d:
+                        t = (t - (d['dem_mean_elev'] - d['clim_alt']) *
+                             cfg.PARAMS['temp_default_gradient'])
+                    else:
+                        t = np.NaN
+                    d['clim_temp_avgh'] = t
+                    d['clim_prcp'] = cds.prcp.mean(dim='time').values * 12
 
-        # Calving
-        if gdir.has_file('calving_output', div_id=1):
-            all_calving_data = []
-            all_width = []
-            for i in gdir.divide_ids:
-                cl = gdir.read_pickle('calving_output', div_id=i)
-                for c in cl:
-                    all_calving_data = c['calving_fluxes'][-1]
-                    all_width = c['t_width']
-            d['calving_flux'] = all_calving_data
-            d['calving_front_width'] = all_width
-        else:
-            d['calving_flux'] = np.NaN
-            d['calving_front_width'] = np.NaN
+            # Inversion
+            if gdir.has_file('inversion_output', div_id=1):
+                vol = []
+                for i in gdir.divide_ids:
+                    cl = gdir.read_pickle('inversion_output', div_id=i)
+                    for c in cl:
+                        vol.extend(c['volume'])
+                d['inv_volume_km3'] = np.nansum(vol) * 1e-9
+                area = gdir.rgi_area_km2
+                d['inv_thickness_m'] = d['inv_volume_km3'] / area * 1000
+                d['vas_volume_km3'] = 0.034*(area**1.375)
+                d['vas_thickness_m'] = d['vas_volume_km3'] / area * 1000
 
+            # Calving
+            if gdir.has_file('calving_output', div_id=1):
+                all_calving_data = []
+                all_width = []
+                for i in gdir.divide_ids:
+                    cl = gdir.read_pickle('calving_output', div_id=i)
+                    for c in cl:
+                        all_calving_data = c['calving_fluxes'][-1]
+                        all_width = c['t_width']
+                d['calving_flux'] = all_calving_data
+                d['calving_front_width'] = all_width
+            else:
+                d['calving_flux'] = np.NaN
+                d['calving_front_width'] = np.NaN
+        except:
+            # We're good with any error - we store the dict anyway below
+            pass
 
         out_df.append(d)
 
-    cols = list(out_df[0].keys())
-    out = pd.DataFrame(out_df, columns=cols).set_index('rgi_id')
+    out = pd.DataFrame(out_df).set_index('rgi_id')
     if path:
         if path is True:
             out.to_csv(os.path.join(cfg.PATHS['working_dir'],
@@ -1822,7 +1918,7 @@ class entity_task(object):
                 pipe_log(gdir, task_func, err=err)
                 self.log.error('%s occured during task %s on %s!',
                         type(err).__name__, task_func.__name__, gdir.rgi_id)
-                if not cfg.CONTINUE_ON_ERROR:
+                if not cfg.PARAMS['continue_on_error']:
                     raise
             return out
 
@@ -1895,7 +1991,7 @@ def filter_rgi_name(name):
 
     if name[-1] in ['À', 'È', 'è', '\x9c', '3', 'Ð', '°', '¾',
                     '\r', '\x93', '¤', '0', '`', '/', 'C', '@',
-                    'Å', '\x06', '\x10', '^', 'å']:
+                    'Å', '\x06', '\x10', '^', 'å', ';']:
         return filter_rgi_name(name[:-1])
 
     return name.strip().title()
@@ -1992,8 +2088,8 @@ class GlacierDirectory(object):
             self.cenlon = float(rgi_entity.CenLon)
             self.cenlat = float(rgi_entity.CenLat)
             self.rgi_region = '{:02d}'.format(int(rgi_entity.O1Region))
-            self.rgi_subregion = self.rgi_region + '-' + \
-                                 '{:02d}'.format(int(rgi_entity.O2Region))
+            self.rgi_subregion = (self.rgi_region + '-' +
+                                  '{:02d}'.format(int(rgi_entity.O2Region)))
             name = rgi_entity.Name
             rgi_datestr = rgi_entity.BgnDate
             gtype = rgi_entity.GlacType
@@ -2100,6 +2196,37 @@ class GlacierDirectory(object):
         """Iterator over the glacier divides ids"""
         return range(1, self.n_divides+1)
 
+    def copy_to_basedir(self, base_dir, setup='run'):
+        """Copies the glacier directory and its content to a new location.
+
+        This utility function allows to select certain files only, thus
+        saving time at copy.
+
+        Parameters
+        ----------
+        basedir : str
+            path to the new base directory (should end with "per_glacier" most
+            of the times)
+        setup : str
+            set up you want the copied directory to be useful for. Currently
+            supported are 'all' (copy the entire directory) and 'run' (copy)
+            the necessary files for a dynamical run).
+        """
+
+        base_dir = os.path.abspath(base_dir)
+        new_dir = os.path.join(base_dir, self.rgi_id[:8], self.rgi_id[:11],
+                               self.rgi_id)
+        if setup == 'run':
+            paths = ['model_flowlines', 'inversion_params',
+                     'local_mustar', 'climate_monthly']
+            paths = ('*' + p + '*' for p in paths)
+            shutil.copytree(self.dir, new_dir,
+                            ignore=include_patterns(*paths))
+        elif setup == 'all':
+            shutil.copytree(self.dir, new_dir)
+        else:
+            raise ValueError('setup not understood: {}'.format(setup))
+
     def get_filepath(self, filename, div_id=0, delete=False, filesuffix=''):
         """Absolute path to a specific file.
 
@@ -2133,7 +2260,7 @@ class GlacierDirectory(object):
         if filesuffix:
             fname = fname.split('.')
             assert len(fname) == 2
-            fname = fname[0] + '_' + filesuffix + '.' + fname[1]
+            fname = fname[0] + filesuffix + '.' + fname[1]
         out = os.path.join(dir, fname)
         if delete and os.path.isfile(out):
             os.remove(out)
@@ -2168,8 +2295,8 @@ class GlacierDirectory(object):
         -------
         An object read from the pickle
         """
-        use_comp = use_compression if use_compression is not None \
-            else cfg.PARAMS['use_compression']
+        use_comp = (use_compression if use_compression is not None
+                    else cfg.PARAMS['use_compression'])
         _open = gzip.open if use_comp else open
         with _open(self.get_filepath(filename, div_id), 'rb') as f:
             out = pickle.load(f)
@@ -2191,8 +2318,8 @@ class GlacierDirectory(object):
             whether or not the file ws compressed. Default is to use
             cfg.PARAMS['use_compression'] for this (recommended)
         """
-        use_comp = use_compression if use_compression is not None \
-            else cfg.PARAMS['use_compression']
+        use_comp = (use_compression if use_compression is not None
+                    else cfg.PARAMS['use_compression'])
         _open = gzip.open if use_comp else open
         with _open(self.get_filepath(filename, div_id), 'wb') as f:
             pickle.dump(var, f, protocol=-1)

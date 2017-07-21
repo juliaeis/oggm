@@ -19,6 +19,7 @@ import shutil
 import shapely.geometry as shpg
 import numpy as np
 import pandas as pd
+import geopandas as gpd
 from numpy.testing import assert_allclose
 
 # Local imports
@@ -28,8 +29,9 @@ from oggm.core.models.massbalance import LinearMassBalanceModel
 from oggm.tests import is_slow, RUN_MODEL_TESTS, is_performance_test
 import xarray as xr
 from oggm import utils, cfg
+from oggm.utils import get_demo_file
 from oggm.cfg import N, SEC_IN_DAY, SEC_IN_YEAR, SEC_IN_MONTHS
-from oggm.core.preprocessing import climate
+from oggm.core.preprocessing import climate, inversion, centerlines
 
 # after oggm.test
 import matplotlib.pyplot as plt
@@ -46,33 +48,30 @@ DOM_BORDER = 80
 cfg.PATHS['working_dir'] = cfg.PATHS['test_dir']
 
 
-def dummy_constant_bed(hmax=3000., hmin=1000., nx=200):
+def dummy_constant_bed(hmax=3000., hmin=1000., nx=200, map_dx=100.,
+                       widths=3.):
 
-    map_dx = 100.
     dx = 1.
 
     surface_h = np.linspace(hmax, hmin, nx)
     bed_h = surface_h
-    widths = surface_h * 0. + 3.
-
+    widths = surface_h * 0. + widths
     coords = np.arange(0, nx-0.5, 1)
     line = shpg.LineString(np.vstack([coords, coords*0.]).T)
     return [flowline.VerticalWallFlowline(line, dx, map_dx, surface_h,
                                           bed_h, widths)]
 
 
-def dummy_constant_bed_cliff(hmax=3000., hmin=1000., nx=200):
+def dummy_constant_bed_cliff(hmax=3000., hmin=1000., nx=200, map_dx=100.,
+                             cliff_height=250.):
     """
     I introduce a cliff in the bed to test the mass conservation of the models
     Such a cliff could be real or a DEM error/artifact
     """
-    
-    map_dx = 100.
     dx = 1.
 
     surface_h = np.linspace(hmax, hmin, nx)
     
-    cliff_height = 250.0
     surface_h[50:] = surface_h[50:] - cliff_height
     
     bed_h = surface_h
@@ -123,9 +122,8 @@ def dummy_bumpy_bed():
                                           bed_h, widths)]
 
 
-def dummy_noisy_bed():
+def dummy_noisy_bed(map_dx=100.):
 
-    map_dx = 100.
     dx = 1.
     nx = 200
     np.random.seed(42)
@@ -140,34 +138,42 @@ def dummy_noisy_bed():
                                           bed_h, widths)]
 
 
-def dummy_parabolic_bed():
+def dummy_parabolic_bed(hmax=3000., hmin=1000., nx=200, map_dx=100.,
+                        default_shape=5.e-03,
+                        from_other_shape=None, from_other_bed=None):
 
-    map_dx = 100.
     dx = 1.
-    nx = 200
 
-    surface_h = np.linspace(3000, 1000, nx)
-    bed_h = surface_h
-    shape = surface_h * 0. + 5.e-03
+    surface_h = np.linspace(hmax, hmin, nx)
+    bed_h = surface_h*1
+    shape = surface_h * 0. + default_shape
+    if from_other_shape is not None:
+        shape[0:len(from_other_shape)] = from_other_shape
+
+    if from_other_bed is not None:
+        bed_h[0:len(from_other_bed)] = from_other_bed
 
     coords = np.arange(0, nx-0.5, 1)
     line = shpg.LineString(np.vstack([coords, coords*0.]).T)
     return [flowline.ParabolicFlowline(line, dx, map_dx, surface_h,
                                        bed_h, shape)]
 
-def dummy_mixed_bed():
 
-    map_dx = 100.
+def dummy_mixed_bed(deflambdas=3.5, map_dx=100., mixslice=None):
+
     dx = 1.
     nx = 200
 
     surface_h = np.linspace(3000, 1000, nx)
     bed_h = surface_h
     shape = surface_h * 0. + 3.e-03
-    shape[10:20] = np.NaN
+    if mixslice:
+        shape[mixslice] = np.NaN
+    else:
+        shape[10:20] = np.NaN
     is_trapezoid = ~np.isfinite(shape)
     lambdas = shape * 0.
-    lambdas[is_trapezoid] = 3.5
+    lambdas[is_trapezoid] = deflambdas
 
     widths_m = bed_h*0. + 10
     section = bed_h*0.
@@ -220,10 +226,9 @@ def dummy_width_bed():
                                           bed_h, widths)]
 
 
-def dummy_width_bed_tributary():
+def dummy_width_bed_tributary(map_dx=100.):
 
     # bed with tributary glacier
-    map_dx = 100.
     dx = 1.
     nx = 200
 
@@ -1106,8 +1111,8 @@ class TestIO(unittest.TestCase):
         fls = dummy_constant_bed()
         model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
                                         glen_a=self.glen_a)
-        ds = model.run_until_and_store(500)[0]
-
+        ds, ds_diag = model.run_until_and_store(500)
+        ds = ds[0]
 
         fls = dummy_constant_bed()
         model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
@@ -1117,24 +1122,44 @@ class TestIO(unittest.TestCase):
         vol_ref = []
         a_ref = []
         l_ref = []
+        vol_diag = []
+        a_diag = []
+        l_diag = []
         for yr in years:
             model.run_until(yr)
-            vol_ref.append(model.volume_m3)
-            a_ref.append(model.area_m2)
-            l_ref.append(model.length_m)
+            vol_diag.append(model.volume_m3)
+            a_diag.append(model.area_m2)
+            l_diag.append(model.length_m)
+            if int(yr) == yr:
+                vol_ref.append(model.volume_m3)
+                a_ref.append(model.area_m2)
+                l_ref.append(model.length_m)
+                if int(yr) == 500:
+                    secfortest = model.fls[0].section
 
         np.testing.assert_allclose(ds.ts_section.isel(time=-1),
-                                   model.fls[0].section)
+                                   secfortest)
+
+        np.testing.assert_allclose(ds_diag.volume_m3, vol_diag)
+        np.testing.assert_allclose(ds_diag.area_m2, a_diag)
+        np.testing.assert_allclose(ds_diag.length_m, l_diag)
 
         fls = dummy_constant_bed()
-        path = os.path.join(self.test_dir, 'ts_ideal.nc')
-        if os.path.exists(path):
-            os.remove(path)
+        run_path = os.path.join(self.test_dir, 'ts_ideal.nc')
+        diag_path = os.path.join(self.test_dir, 'ts_diag.nc')
+        if os.path.exists(run_path):
+            os.remove(run_path)
+        if os.path.exists(diag_path):
+            os.remove(diag_path)
         model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
                                         glen_a=self.glen_a)
-        _ = model.run_until_and_store(500, path=path)
+        model.run_until_and_store(500, run_path=run_path,
+                                  diag_path=diag_path)
 
-        fmodel = flowline.FileModel(path)
+        ds_ = xr.open_dataset(diag_path)
+        xr.testing.assert_identical(ds_diag, ds_)
+
+        fmodel = flowline.FileModel(run_path)
         fls = dummy_constant_bed()
         model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
                                         glen_a=self.glen_a)
@@ -1149,9 +1174,8 @@ class TestIO(unittest.TestCase):
                                            fmodel.fls[0].widths_m)
 
         np.testing.assert_allclose(fmodel.volume_m3_ts(), vol_ref)
-        np.testing.assert_allclose(fmodel.area_m2_ts(rollmin=0), a_ref)
-        np.testing.assert_allclose(fmodel.length_m_ts().iloc[1:], l_ref[1:],
-                                   atol=101)
+        np.testing.assert_allclose(fmodel.area_m2_ts(), a_ref)
+        np.testing.assert_allclose(fmodel.length_m_ts(), l_ref)
 
         # Can we start a run from the middle?
         fmodel.run_until(300)
@@ -1161,6 +1185,23 @@ class TestIO(unittest.TestCase):
         fmodel.run_until(500)
         np.testing.assert_allclose(model.fls[0].section,
                                    fmodel.fls[0].section)
+
+    def test_gdir_copy(self):
+        print(self.gdir.dir)
+        new_dir = os.path.join(cfg.PATHS['test_dir'], 'tmp_testcopy')
+        if os.path.exists(new_dir):
+            shutil.rmtree(new_dir)
+        self.gdir.copy_to_basedir(new_dir, setup='all')
+        new_gdir = utils.GlacierDirectory(self.gdir.rgi_id, base_dir=new_dir)
+        flowline.init_present_time_glacier(new_gdir)
+        shutil.rmtree(new_dir)
+
+        self.gdir.copy_to_basedir(new_dir)
+        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
+        entity = gpd.GeoDataFrame.from_file(hef_file).iloc[0]
+        new_gdir = utils.GlacierDirectory(entity, base_dir=new_dir)
+        flowline.random_glacier_evolution(new_gdir, nyears=10)
+        shutil.rmtree(new_dir)
 
     def test_hef(self):
 
@@ -2108,6 +2149,351 @@ class TestBackwardsIdealized(unittest.TestCase):
                           mb, y0, y1, rtol=0.02, max_ite=5)
 
 
+class TestIdealisedInversion(unittest.TestCase):
+
+    def setUp(self):
+        # test directory
+        self.testdir = os.path.join(cfg.PATHS['test_dir'],
+                                    'tmp_ideal_inversion')
+
+        from oggm import GlacierDirectory
+        from oggm.tasks import define_glacier_region
+        import geopandas as gpd
+
+        # Init
+        cfg.initialize()
+        cfg.set_divides_db()
+        cfg.PATHS['dem_file'] = get_demo_file('hef_srtm.tif')
+        cfg.PATHS['climate_file'] = get_demo_file('histalp_merged_hef.nc')
+
+        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
+        entity = gpd.GeoDataFrame.from_file(hef_file).iloc[0]
+
+        self.gdir = GlacierDirectory(entity, base_dir=self.testdir, reset=True)
+        define_glacier_region(self.gdir, entity=entity)
+
+    def tearDown(self):
+        self.rm_dir()
+
+    def rm_dir(self):
+        if os.path.exists(self.testdir):
+            shutil.rmtree(self.testdir)
+
+    def simple_plot(self, model):  # pragma: no cover
+        ocls = self.gdir.read_pickle('inversion_output', div_id=1)
+        ithick = ocls[-1]['thick']
+        pg = model.fls[-1].thick > 0
+        plt.figure()
+        bh = model.fls[-1].bed_h[pg]
+        sh = model.fls[-1].surface_h[pg]
+        plt.plot(sh, 'k')
+        plt.plot(bh, 'C0', label='Real bed')
+        plt.plot(sh - ithick, 'C3', label='Computed bed')
+        plt.title('Compare Shape')
+        plt.xlabel('[dx]')
+        plt.ylabel('Elevation [m]')
+        plt.legend(loc=3)
+        plt.show()
+
+    def double_plot(self, model):  # pragma: no cover
+        ocls = self.gdir.read_pickle('inversion_output', div_id=1)
+        f, axs = plt.subplots(1, 2, figsize=(8, 4), sharey=True)
+        for i, ax in enumerate(axs):
+            ithick = ocls[i]['thick']
+            pg = model.fls[i].thick > 0
+            bh = model.fls[i].bed_h[pg]
+            sh = model.fls[i].surface_h[pg]
+            ax.plot(sh, 'k')
+            ax.plot(bh, 'C0', label='Real bed')
+            ax.plot(sh - ithick, 'C3', label='Computed bed')
+            ax.set_title('Compare Shape')
+            ax.set_xlabel('[dx]')
+            ax.legend(loc=3)
+        plt.show()
+
+    def test_inversion_vertical(self):
+
+        fls = dummy_constant_bed(map_dx=self.gdir.grid.dx, widths=10)
+        mb = LinearMassBalanceModel(2600.)
+
+        model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.)
+        model.run_until_equilibrium()
+
+        fls = []
+        for fl in model.fls:
+            pg = np.where(fl.thick > 0)
+            line = shpg.LineString([fl.line.coords[int(p)] for p in pg[0]])
+            flo = centerlines.Centerline(line, dx=fl.dx,
+                                         surface_h=fl.surface_h[pg])
+            flo.widths = fl.widths[pg]
+            flo.touches_border = np.ones(flo.nx).astype(np.bool)
+            fls.append(flo)
+        for did in [0, 1]:
+            self.gdir.write_pickle(copy.deepcopy(fls), 'inversion_flowlines',
+                                   div_id=did)
+
+        climate.apparent_mb_from_linear_mb(self.gdir)
+        inversion.prepare_for_inversion(self.gdir)
+        v, _ = inversion.mass_conservation_inversion(self.gdir)
+
+        assert_allclose(v, model.volume_m3, rtol=0.01)
+        if do_plot:  # pragma: no cover
+            self.simple_plot(model)
+
+    def test_inversion_parabolic(self):
+
+        fls = dummy_parabolic_bed(map_dx=self.gdir.grid.dx)
+        mb = LinearMassBalanceModel(2500.)
+
+        model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.)
+        model.run_until_equilibrium()
+
+        fls = []
+        for fl in model.fls:
+            pg = np.where(fl.thick > 0)
+            line = shpg.LineString([fl.line.coords[int(p)] for p in pg[0]])
+            flo = centerlines.Centerline(line, dx=fl.dx,
+                                         surface_h=fl.surface_h[pg])
+            flo.widths = fl.widths[pg]
+            flo.touches_border = np.zeros(flo.nx).astype(np.bool)
+            fls.append(flo)
+        for did in [0, 1]:
+            self.gdir.write_pickle(copy.deepcopy(fls), 'inversion_flowlines',
+                                   div_id=did)
+
+        climate.apparent_mb_from_linear_mb(self.gdir)
+        inversion.prepare_for_inversion(self.gdir)
+        v, _ = inversion.mass_conservation_inversion(self.gdir)
+        assert_allclose(v, model.volume_m3, rtol=0.01)
+
+        inv = self.gdir.read_pickle('inversion_output', div_id=1)[-1]
+        bed_shape_gl = 4 * inv['thick'] / (flo.widths * self.gdir.grid.dx) ** 2
+        bed_shape_ref = 4 * fl.thick[pg] / (flo.widths * self.gdir.grid.dx) ** 2
+
+        # assert utils.rmsd(fl.bed_shape[pg], bed_shape_gl) < 0.001
+        if do_plot:  # pragma: no cover
+            plt.plot(bed_shape_ref[:-3])
+            plt.plot(bed_shape_gl[:-3])
+            plt.show()
+
+    @is_slow
+    def test_inversion_mixed(self):
+
+        fls = dummy_mixed_bed(deflambdas=0, map_dx=self.gdir.grid.dx,
+                              mixslice=slice(10, 30))
+        mb = LinearMassBalanceModel(2600.)
+
+        model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
+                                        time_stepping='conservative')
+        model.run_until_equilibrium()
+        fls = []
+        for fl in model.fls:
+            pg = np.where(fl.thick > 0)
+            line = shpg.LineString([fl.line.coords[int(p)] for p in pg[0]])
+            sh = fl.surface_h[pg]
+            flo = centerlines.Centerline(line, dx=fl.dx,
+                                         surface_h=sh)
+            flo.widths = fl.widths[pg]
+            flo.touches_border = fl.is_trapezoid[pg]
+            fls.append(flo)
+        for did in [0, 1]:
+            self.gdir.write_pickle(copy.deepcopy(fls), 'inversion_flowlines',
+                                   div_id=did)
+
+        climate.apparent_mb_from_linear_mb(self.gdir)
+        inversion.prepare_for_inversion(self.gdir)
+        v, _ = inversion.mass_conservation_inversion(self.gdir)
+
+        assert_allclose(v, model.volume_m3, rtol=0.01)
+        if do_plot:  # pragma: no cover
+            self.simple_plot(model)
+
+    @is_slow
+    def test_inversion_cliff(self):
+
+        fls = dummy_constant_bed_cliff(map_dx=self.gdir.grid.dx,
+                                       cliff_height=100)
+        mb = LinearMassBalanceModel(2600.)
+
+        model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
+                                        time_stepping='conservative')
+        model.run_until_equilibrium()
+        fls = []
+        for fl in model.fls:
+            pg = np.where(fl.thick > 0)
+            line = shpg.LineString([fl.line.coords[int(p)] for p in pg[0]])
+            sh = fl.surface_h[pg]
+            flo = centerlines.Centerline(line, dx=fl.dx,
+                                         surface_h=sh)
+            flo.widths = fl.widths[pg]
+            flo.touches_border = np.ones(flo.nx).astype(np.bool)
+            fls.append(flo)
+        for did in [0, 1]:
+            self.gdir.write_pickle(copy.deepcopy(fls), 'inversion_flowlines',
+                                   div_id=did)
+
+        climate.apparent_mb_from_linear_mb(self.gdir)
+        inversion.prepare_for_inversion(self.gdir)
+        v, _ = inversion.mass_conservation_inversion(self.gdir)
+
+        assert_allclose(v, model.volume_m3, rtol=0.05)
+        if do_plot:  # pragma: no cover
+            self.simple_plot(model)
+
+    def test_inversion_noisy(self):
+
+        fls = dummy_noisy_bed(map_dx=self.gdir.grid.dx)
+        mb = LinearMassBalanceModel(2600.)
+
+        model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
+                                        time_stepping='conservative')
+        model.run_until_equilibrium()
+        fls = []
+        for fl in model.fls:
+            pg = np.where(fl.thick > 0)
+            line = shpg.LineString([fl.line.coords[int(p)] for p in pg[0]])
+            sh = fl.surface_h[pg]
+            flo = centerlines.Centerline(line, dx=fl.dx,
+                                         surface_h=sh)
+            flo.widths = fl.widths[pg]
+            flo.touches_border = np.ones(flo.nx).astype(np.bool)
+            fls.append(flo)
+        for did in [0, 1]:
+            self.gdir.write_pickle(copy.deepcopy(fls), 'inversion_flowlines',
+                                   div_id=did)
+
+        climate.apparent_mb_from_linear_mb(self.gdir)
+        inversion.prepare_for_inversion(self.gdir)
+        v, _ = inversion.mass_conservation_inversion(self.gdir)
+
+        assert_allclose(v, model.volume_m3, rtol=0.05)
+        if do_plot:  # pragma: no cover
+            self.simple_plot(model)
+
+    def test_inversion_tributary(self):
+
+        fls = dummy_width_bed_tributary(map_dx=self.gdir.grid.dx)
+        mb = LinearMassBalanceModel(2600.)
+
+        model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
+                                        time_stepping='conservative')
+        model.run_until_equilibrium()
+
+        fls = []
+        for fl in model.fls:
+            pg = np.where(fl.thick > 0)
+            line = shpg.LineString([fl.line.coords[int(p)] for p in pg[0]])
+            sh = fl.surface_h[pg]
+            flo = centerlines.Centerline(line, dx=fl.dx,
+                                         surface_h=sh)
+            flo.widths = fl.widths[pg]
+            flo.touches_border = np.ones(flo.nx).astype(np.bool)
+            fls.append(flo)
+
+        fls[0].set_flows_to(fls[1])
+
+        for did in [0, 1]:
+            self.gdir.write_pickle(copy.deepcopy(fls), 'inversion_flowlines',
+                                   div_id=did)
+
+        climate.apparent_mb_from_linear_mb(self.gdir)
+        inversion.prepare_for_inversion(self.gdir)
+        v, _ = inversion.mass_conservation_inversion(self.gdir)
+
+        assert_allclose(v, model.volume_m3, rtol=0.02)
+        if do_plot:  # pragma: no cover
+            self.double_plot(model)
+
+    def test_inversion_non_equilibrium(self):
+
+        fls = dummy_constant_bed(map_dx=self.gdir.grid.dx)
+        mb = LinearMassBalanceModel(2600.)
+
+        model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.)
+        model.run_until_equilibrium()
+
+        mb = LinearMassBalanceModel(2800.)
+        model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0)
+        model.run_until(50)
+
+        fls = []
+        for fl in model.fls:
+            pg = np.where(fl.thick > 0)
+            line = shpg.LineString([fl.line.coords[int(p)] for p in pg[0]])
+            sh = fl.surface_h[pg]
+            flo = centerlines.Centerline(line, dx=fl.dx,
+                                         surface_h=sh)
+            flo.widths = fl.widths[pg]
+            flo.touches_border = np.ones(flo.nx).astype(np.bool)
+            fls.append(flo)
+        for did in [0, 1]:
+            self.gdir.write_pickle(copy.deepcopy(fls), 'inversion_flowlines',
+                                   div_id=did)
+
+        climate.apparent_mb_from_linear_mb(self.gdir)
+        inversion.prepare_for_inversion(self.gdir)
+        v, _ = inversion.mass_conservation_inversion(self.gdir)
+
+        # expected errors
+        assert v > model.volume_m3
+        ocls = self.gdir.read_pickle('inversion_output', div_id=1)
+        ithick = ocls[0]['thick']
+        assert np.mean(ithick) > np.mean(model.fls[0].thick)*1.1
+        if do_plot:  # pragma: no cover
+            self.simple_plot(model)
+
+    def test_inversion_and_run(self):
+
+        fls = dummy_parabolic_bed(map_dx=self.gdir.grid.dx)
+        mb = LinearMassBalanceModel(2500.)
+
+        model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.)
+        model.run_until_equilibrium()
+        fls = []
+        for fl in model.fls:
+            pg = np.where(fl.thick > 0)
+            line = shpg.LineString([fl.line.coords[int(p)] for p in pg[0]])
+            sh = fl.surface_h[pg]
+            flo = centerlines.Centerline(line, dx=fl.dx,
+                                         surface_h=sh)
+            flo.widths = fl.widths[pg]
+            flo.touches_border = np.zeros(flo.nx).astype(np.bool)
+            fls.append(flo)
+        for did in [0, 1]:
+            self.gdir.write_pickle(copy.deepcopy(fls), 'inversion_flowlines',
+                                   div_id=did)
+
+        climate.apparent_mb_from_linear_mb(self.gdir)
+        inversion.prepare_for_inversion(self.gdir)
+        v, _ = inversion.mass_conservation_inversion(self.gdir)
+
+        assert_allclose(v, model.volume_m3, rtol=0.01)
+
+        inv = self.gdir.read_pickle('inversion_output', div_id=1)[-1]
+        bed_shape_gl = 4 * inv['thick'] / (flo.widths * self.gdir.grid.dx) ** 2
+        bed_shape_ref = 4 * fl.thick[pg] / (flo.widths * self.gdir.grid.dx) ** 2
+
+        ithick = inv['thick']
+        fls = dummy_parabolic_bed(map_dx=self.gdir.grid.dx,
+                                  from_other_shape=bed_shape_gl[:-2],
+                                  from_other_bed=sh-ithick)
+        model2 = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
+                                        time_stepping='conservative')
+        model2.run_until_equilibrium()
+        assert_allclose(model2.volume_m3, model.volume_m3, rtol=0.01)
+
+        if do_plot:  # pragma: no cover
+            plt.figure()
+            plt.plot(model.fls[-1].bed_h, 'C0')
+            plt.plot(model2.fls[-1].bed_h, 'C3')
+            plt.plot(model.fls[-1].surface_h, 'C0')
+            plt.plot(model2.fls[-1].surface_h, 'C3')
+            plt.title('Compare Shape')
+            plt.xlabel('[m]')
+            plt.ylabel('Elevation [m]')
+            plt.show()
+
+
 class TestHEF(unittest.TestCase):
 
     def setUp(self):
@@ -2213,17 +2599,17 @@ class TestHEF(unittest.TestCase):
     def test_random(self):
 
         flowline.init_present_time_glacier(self.gdir)
-        flowline.random_glacier_evolution(self.gdir, nyears=200, seed=5,
+        flowline.random_glacier_evolution(self.gdir, nyears=200, seed=4,
                                           bias=0)
-        path = self.gdir.get_filepath('past_model')
+        path = self.gdir.get_filepath('model_run')
 
         with flowline.FileModel(path) as model:
             vol = model.volume_km3_ts()
             len = model.length_m_ts()
             area = model.area_km2_ts()
             np.testing.assert_allclose(vol.iloc[0], np.mean(vol), rtol=0.1)
-            np.testing.assert_allclose(0.07, np.std(vol), atol=0.02)
             np.testing.assert_allclose(area.iloc[0], np.mean(area), rtol=0.1)
+
             if do_plot:
                 fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(6, 10))
                 vol.plot(ax=ax1)
@@ -2246,16 +2632,14 @@ class TestHEF(unittest.TestCase):
         for feedback in feedbacks:
             start_time = time.time()
             flowline.random_glacier_evolution(self.gdir, nyears=200, seed=5,
-                                              cfl_number=1./30,
                                               mb_elev_feedback=feedback)
             end_time = time.time()
             times.append(end_time - start_time)
             out.append(utils.compile_run_output([self.gdir], path=False))
 
         # Check that volume isn't so different
-        assert_allclose(out[0].volume, out[1].volume, rtol=0.1)
-        assert_allclose(out[0].volume, out[2].volume, rtol=0.1)
-        # Last two should be closer
+        assert_allclose(out[0].volume, out[1].volume, rtol=0.05)
+        assert_allclose(out[0].volume, out[2].volume, rtol=0.05)
         assert_allclose(out[1].volume, out[2].volume, rtol=0.05)
 
         if do_plot:
@@ -2293,7 +2677,7 @@ class TestHEF(unittest.TestCase):
         flowline.iterative_initial_glacier_search(gdir, y0=df.index[0], init_bias=init_bias,
                                                   rtol=rtol, write_steps=True)
 
-        past_model = flowline.FileModel(gdir.get_filepath('past_model'))
+        past_model = flowline.FileModel(gdir.get_filepath('model_run'))
 
         vol_start = past_model.volume_km3
         bef_fls = copy.deepcopy(past_model.fls)

@@ -695,7 +695,8 @@ class TestClimate(unittest.TestCase):
             ref_h = nc_r.variables['hgt'][1, 1]
             ref_p = nc_r.variables['prcp'][:, 1, 1]
             ref_t = nc_r.variables['temp'][:, 1, 1]
-            ref_t = np.where(ref_t < 0, 0, ref_t)
+            ref_t = np.where(ref_t < cfg.PARAMS['temp_melt'], 0,
+                             ref_t - cfg.PARAMS['temp_melt'])
 
         hgts = np.array([ref_h, ref_h, -8000, 8000])
         time, temp, prcp = climate.mb_climate_on_height(gdir, hgts, 1.)
@@ -754,7 +755,8 @@ class TestClimate(unittest.TestCase):
             ref_h = nc_r.variables['hgt'][1, 1]
             ref_p = nc_r.variables['prcp'][:, 1, 1]
             ref_t = nc_r.variables['temp'][:, 1, 1]
-            ref_t = np.where(ref_t < 0, 0, ref_t)
+            ref_t = np.where(ref_t <= cfg.PARAMS['temp_melt'], 0,
+                             ref_t - cfg.PARAMS['temp_melt'])
 
         # NORMAL --------------------------------------------------------------
         hgts = np.array([ref_h, ref_h, -8000, 8000])
@@ -1110,21 +1112,21 @@ class TestClimate(unittest.TestCase):
         bias_std, prcp_fac = res['std_bias'], res['prcp_fac']
 
         # check that other prcp_factors are less good
-        cfg.PARAMS['prcp_scaling_factor'] = prcp_fac + 0.1
+        cfg.PARAMS['prcp_scaling_factor'] = prcp_fac + 0.3
         climate.compute_ref_t_stars(gdirs)
         climate.distribute_t_stars(gdirs)
         res = climate.t_star_from_refmb(gdir, mbdf)
         bias_std_after, prcp_fac_after = res['std_bias'], res['prcp_fac']
         self.assertLessEqual(np.abs(np.mean(bias_std)), np.abs(np.mean(bias_std_after)))
-        self.assertEqual(prcp_fac + 0.1, prcp_fac_after)
+        self.assertEqual(prcp_fac + 0.3, prcp_fac_after)
 
-        cfg.PARAMS['prcp_scaling_factor'] = prcp_fac - 0.1
+        cfg.PARAMS['prcp_scaling_factor'] = prcp_fac - 0.3
         climate.compute_ref_t_stars(gdirs)
         climate.distribute_t_stars(gdirs)
         res = climate.t_star_from_refmb(gdir, mbdf)
         bias_std_after, prcp_fac_after = res['std_bias'], res['prcp_fac']
         self.assertLessEqual(np.abs(np.mean(bias_std)), np.abs(np.mean(bias_std_after)))
-        self.assertEqual(prcp_fac - 0.1, prcp_fac_after)
+        self.assertEqual(prcp_fac - 0.3, prcp_fac_after)
 
         cfg.PARAMS['prcp_scaling_factor'] = 2.5
 
@@ -1132,6 +1134,8 @@ class TestClimate(unittest.TestCase):
 
         hef_file = get_demo_file('Hintereisferner.shp')
         entity = gpd.GeoDataFrame.from_file(hef_file).iloc[0]
+
+        cfg.PARAMS['prcp_scaling_factor'] = 2.9
 
         gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
         gis.define_glacier_region(gdir, entity=entity)
@@ -1143,11 +1147,10 @@ class TestClimate(unittest.TestCase):
         geometry.catchment_width_correction(gdir)
         climate.process_histalp_nonparallel([gdir])
         climate.mu_candidates(gdir, div_id=0)
-
         mbdf = gdir.get_ref_mb_data()
         res = climate.t_star_from_refmb(gdir, mbdf['ANNUAL_BALANCE'])
         t_star, bias, prcp_fac = res['t_star'], res['bias'],  res['prcp_fac']
-        self.assertEqual(prcp_fac, 2.5)
+        self.assertEqual(prcp_fac, 2.9)
 
         t_star = t_star[-1]
         bias = bias[-1]
@@ -1192,6 +1195,8 @@ class TestClimate(unittest.TestCase):
         slope_obs, _, _, _, _ = linregress(dfg.index, dfg.values)
         slope_our, _, _, _, _ = linregress(h[pok], mb_on_h[pok])
         np.testing.assert_allclose(slope_obs, slope_our, rtol=0.1)
+
+        cfg.PARAMS['prcp_scaling_factor'] = 2.5
 
 
 class TestInversion(unittest.TestCase):
@@ -1560,7 +1565,7 @@ class TestInversion(unittest.TestCase):
             _max = np.max(thick)
             if _max > maxs:
                 maxs = _max
-        np.testing.assert_allclose(242, maxs, atol=31)
+        np.testing.assert_allclose(242, maxs, atol=40)
 
         # check that its not tooo sensitive to the dx
         cfg.PARAMS['flowline_dx'] = 1.
@@ -1595,7 +1600,7 @@ class TestInversion(unittest.TestCase):
 
     def test_continue_on_error(self):
 
-        cfg.CONTINUE_ON_ERROR = True
+        cfg.PARAMS['continue_on_error'] = True
         cfg.PATHS['working_dir'] = self.testdir
 
         hef_file = get_demo_file('Hintereisferner.shp')
@@ -1626,7 +1631,7 @@ class TestInversion(unittest.TestCase):
         rdir = os.path.join(rdir, 'log.txt')
         self.assertTrue(os.path.exists(rdir))
 
-        cfg.CONTINUE_ON_ERROR = False
+        cfg.PARAMS['continue_on_error'] = False
 
         # Test the glacier charac
         dfc = utils.glacier_characteristics([gdir])
@@ -1789,7 +1794,8 @@ class TestGrindelInvert(unittest.TestCase):
         np.testing.assert_allclose(v, model.volume_m3, rtol=0.01)
 
         cl = gdir.read_pickle('inversion_output', div_id=1)[0]
-        assert utils.rmsd(cl['thick'], model.fls[0].thick[:len(cl['thick'])]) < 10.
+        rmsd = utils.rmsd(cl['thick'], model.fls[0].thick[:len(cl['thick'])])
+        assert rmsd < 10.
 
     @requires_py3
     def test_invert_and_run(self):
@@ -1881,7 +1887,7 @@ class TestCatching(unittest.TestCase):
 
         # Make it large to raise an error
         cfg.PARAMS['border'] = 250
-        cfg.CONTINUE_ON_ERROR = True
+        cfg.PARAMS['continue_on_error'] = True
 
         gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
         gis.define_glacier_region(gdir, entity=entity)
@@ -1891,7 +1897,7 @@ class TestCatching(unittest.TestCase):
 
         hef_file = get_demo_file('Hintereisferner.shp')
         entity = gpd.GeoDataFrame.from_file(hef_file).iloc[0]
-        cfg.CONTINUE_ON_ERROR = True
+        cfg.PARAMS['continue_on_error'] = True
 
         gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
         gis.define_glacier_region(gdir, entity=entity)

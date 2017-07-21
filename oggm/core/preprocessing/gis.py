@@ -99,8 +99,10 @@ def _check_geometry(geometry):
             if parts[0].contains(p):
                 interiors.append(p.exterior)
             else:
-                # This should not happen See that we have a small geom here
-                assert p.area < 1e-9
+                # This should not happen. Check that we have a small geom here
+                if p.area > 1e-4:
+                    log.warning('warning while correcting geometry. Area was: '
+                                '{} but it should be smaller.'.format(p.area))
         geometry = shpg.Polygon(exterior, interiors)
 
     assert 'Polygon' in geometry.type
@@ -390,13 +392,15 @@ def define_glacier_region(gdir, entity=None):
 
     # Also transform the intersects if necessary
     gdf = cfg.PARAMS['intersects_gdf']
-    gdf = gdf.loc[(gdf.RGIId_1 == gdir.rgi_id) | (gdf.RGIId_2 == gdir.rgi_id)]
     if len(gdf) > 0:
-        gdf = salem.transform_geopandas(gdf, to_crs=proj_out)
-        if hasattr(gdf.crs, 'srs'):
-            # salem uses pyproj
-            gdf.crs = gdf.crs.srs
-        gdf.to_file(gdir.get_filepath('intersects'))
+        gdf = gdf.loc[((gdf.RGIId_1 == gdir.rgi_id) |
+                       (gdf.RGIId_2 == gdir.rgi_id))]
+        if len(gdf) > 0:
+            gdf = salem.transform_geopandas(gdf, to_crs=proj_out)
+            if hasattr(gdf.crs, 'srs'):
+                # salem uses pyproj
+                gdf.crs = gdf.crs.srs
+            gdf.to_file(gdir.get_filepath('intersects'))
 
     # Open DEM
     source = entity.DEM_SOURCE if hasattr(entity, 'DEM_SOURCE') else None
