@@ -34,6 +34,7 @@ import netCDF4
 import shapely.geometry as shpg
 import scipy.signal
 from scipy.interpolate import RegularGridInterpolator
+from scipy import optimize as optimization
 # Locals
 import oggm.cfg as cfg
 from oggm.cfg import GAUSSIAN_KERNEL
@@ -83,12 +84,15 @@ class Centerline(object):
         self.dx = dx  # dx in pixels (assumes the line is on constant dx
         self._surface_h = surface_h
         self._widths = None
-        self.touches_border = None
+        self.is_rectangular = None
 
         # Set by external funcs
+        self.orig_centerline_id = None  # id of original centerline object
         self.geometrical_widths = None  # these are kept for plotting and such
         self.apparent_mb = None  # Apparent MB, NOT weighted by width.
         self.flux = None  # Flux (kg m-2)
+        self.flux_needed_correction = False  # whether this branch was baaad
+        self.flux_before_correction = None
 
     def set_flows_to(self, other, check_tail=True, last_point=False):
         """Find the closest point in "other" and sets all the corresponding
@@ -231,8 +235,33 @@ class Centerline(object):
 
         # Add MB to current flux and sum
         # no more changes should happen after that
-        self.flux += mb * self.widths * self.dx
-        self.flux = np.cumsum(self.flux)
+        flux_needed_correction = False
+        flux = np.cumsum(self.flux + mb * self.widths * self.dx)
+        # We need to keep the flux -- even negative! -- in order to keep
+        # mass conservation downstream. This is quite bad and calls for a
+        # better solution
+        add_flux = flux[-1]
+        # We filter only lines with two negative gridpoints, the
+        # rest we can cope with
+        if cfg.PARAMS['correct_for_neg_flux'] and flux[-2] < 0:
+            # Some glacier geometries imply that some tributaries have a
+            # negative mass flux, i.e. zero thickness. One can correct for
+            # this effect, but this implies playing around with the
+            # mass-balance...
+            target_flux = 1 if (self.flows_to is not None) else 0
+
+            def to_optimize(x):
+                tmp_flux = self.flux + (x[0] + mb) * self.widths * self.dx
+                tmp_flux = np.cumsum(tmp_flux)
+                return (tmp_flux[-1] - target_flux)**2
+
+            x = optimization.minimize(to_optimize, [1.])['x']
+            flux = np.cumsum(self.flux + (x[0] + mb) * self.widths * self.dx)
+            flux_needed_correction = True
+
+        self.flux = flux
+        self.flux_needed_correction = flux_needed_correction
+        self.flux_before_correction = add_flux
 
         # Add to outflow. That's why it should happen in order
         if self.flows_to is not None:
@@ -240,13 +269,13 @@ class Centerline(object):
             ide = self.flows_to_indice
             if n >= 9:
                 gk = GAUSSIAN_KERNEL[9]
-                self.flows_to.flux[ide-4:ide+5] += gk * self.flux[-1]
+                self.flows_to.flux[ide-4:ide+5] += gk * add_flux
             elif n >= 7:
                 gk = GAUSSIAN_KERNEL[7]
-                self.flows_to.flux[ide-3:ide+4] += gk * self.flux[-1]
+                self.flows_to.flux[ide-3:ide+4] += gk * add_flux
             elif n >= 5:
                 gk = GAUSSIAN_KERNEL[5]
-                self.flows_to.flux[ide-2:ide+3] += gk * self.flux[-1]
+                self.flows_to.flux[ide-2:ide+3] += gk * add_flux
 
 
 def _filter_heads(heads, heads_height, radius, polygon):
@@ -637,9 +666,54 @@ def _normalize(n):
     return n1, n2
 
 
+def _get_centerlines_heads(gdir, ext_yx, zoutline, single_fl,
+                           glacier_mask, topo, geom, poly_pix):
+
+    # Size of the half window to use to look for local maximas
+    maxorder = np.rint(cfg.PARAMS['localmax_window'] / gdir.grid.dx)
+    maxorder = np.clip(maxorder, 5., np.rint((len(zoutline) / 5.)))
+    heads_idx = scipy.signal.argrelmax(zoutline, mode='wrap',
+                                       order=maxorder.astype(np.int64))
+    if single_fl or len(heads_idx[0]) <= 1:
+        # small glaciers with one or less heads: take the absolute max
+        heads_idx = (np.atleast_1d(np.argmax(zoutline)),)
+
+    # Remove the heads that are too low
+    zglacier = topo[np.where(glacier_mask)]
+    head_threshold = np.percentile(zglacier, (1./3.)*100)
+    _heads_idx = heads_idx[0][np.where(zoutline[heads_idx] > head_threshold)]
+    if len(_heads_idx) == 0:
+        # this is for baaad ice caps where the outline is far off in altitude
+        _heads_idx = [heads_idx[0][np.argmax(zoutline[heads_idx])]]
+    heads_idx = _heads_idx
+    heads = np.asarray(ext_yx)[:, heads_idx]
+    heads_z = zoutline[heads_idx]
+    # careful, the coords are in y, x order!
+    heads = [shpg.Point(x, y) for y, x in zip(heads[0, :],
+                                              heads[1, :])]
+
+    # get radius of the buffer according to Kienholz eq. (1)
+    radius = cfg.PARAMS['q1'] * geom['polygon_area'] + cfg.PARAMS['q2']
+    radius = np.clip(radius, 0, cfg.PARAMS['rmax'])
+    radius /= gdir.grid.dx # in raster coordinates
+    # Plus our criteria, quite useful to remove short lines:
+    radius += cfg.PARAMS['flowline_junction_pix'] * cfg.PARAMS['flowline_dx']
+    log.debug('(%s) radius in raster coordinates: %.2f',
+              gdir.rgi_id, radius)
+
+    # OK. Filter and see.
+    log.debug('(%s) number of heads before radius filter: %d',
+              gdir.rgi_id, len(heads))
+    heads, heads_z = _filter_heads(heads, heads_z, radius, poly_pix)
+    log.debug('(%s) number of heads after radius filter: %d',
+              gdir.rgi_id, len(heads))
+
+    return heads
+
+
 @entity_task(log, writes=['centerlines', 'gridded_data'])
 @divide_task(log, add_0=False)
-def compute_centerlines(gdir, div_id=None):
+def compute_centerlines(gdir, div_id=None, heads=None):
     """Compute the centerlines following Kienholz et al., (2014).
 
     They are then sorted according to the modified Strahler number:
@@ -647,16 +721,21 @@ def compute_centerlines(gdir, div_id=None):
 
     Parameters
     ----------
-    gdir : oggm.GlacierDirectory
+    heads : list, optional
+        list of shpg.Points to use as line heads (default is to compute them
+        like Kienholz did)
     """
 
     # Params
     single_fl = not cfg.PARAMS['use_multiple_flowlines']
     do_filter_slope = cfg.PARAMS['filter_min_slope']
 
+    # Force single flowline for ice caps
+    if gdir.is_icecap:
+        single_fl = True
+
     if 'force_one_flowline' in cfg.PARAMS:
-        if gdir.rgi_id in cfg.PARAMS['force_one_flowline']:
-            single_fl = True
+        raise ValueError('`force_one_flowline` is deprecated')
 
     # open
     geom = gdir.read_pickle('geometries', div_id=div_id)
@@ -673,40 +752,9 @@ def compute_centerlines(gdir, div_id=None):
     ext_yx = tuple(reversed(poly_pix.exterior.xy))
     zoutline = topo[y[:-1], x[:-1]]  # last point is first point
 
-    # Size of the half window to use to look for local maximas
-    maxorder = np.rint(cfg.PARAMS['localmax_window'] / gdir.grid.dx)
-    maxorder = np.clip(maxorder, 5., np.rint((len(zoutline) / 5.)))
-    heads_idx = scipy.signal.argrelmax(zoutline, mode='wrap',
-                                       order=maxorder.astype(np.int64))
-    if single_fl or len(heads_idx[0]) <= 1:
-        # small glaciers with one or less heads: take the absolute max
-        heads_idx = (np.atleast_1d(np.argmax(zoutline)),)
-
-    # Remove the heads that are too low
-    zglacier = topo[np.where(glacier_mask)]
-    head_threshold = np.percentile(zglacier, (1./3.)*100)
-    heads_idx = heads_idx[0][np.where(zoutline[heads_idx] > head_threshold)]
-    heads = np.asarray(ext_yx)[:, heads_idx]
-    heads_z = zoutline[heads_idx]
-    # careful, the coords are in y, x order!
-    heads = [shpg.Point(x, y) for y, x in zip(heads[0, :],
-                                              heads[1, :])]
-
-    # get radius of the buffer according to Kienholz eq. (1)
-    radius = cfg.PARAMS['q1'] * geom['polygon_area'] + cfg.PARAMS['q2']
-    radius = np.clip(radius, 0, cfg.PARAMS['rmax'])
-    radius /= gdir.grid.dx # in raster coordinates
-    # Plus our criteria, quite usefull to remove short lines:
-    radius += cfg.PARAMS['flowline_junction_pix'] * cfg.PARAMS['flowline_dx']
-    log.debug('%s: radius in raster coordinates: %.2f',
-              gdir.rgi_id, radius)
-
-    # OK. Filter and see.
-    log.debug('%s: number of heads before radius filter: %d',
-              gdir.rgi_id, len(heads))
-    heads, heads_z = _filter_heads(heads, heads_z, radius, poly_pix)
-    log.debug('%s: number of heads after radius filter: %d',
-              gdir.rgi_id, len(heads))
+    if heads is None:
+        heads = _get_centerlines_heads(gdir, ext_yx, zoutline, single_fl,
+                                       glacier_mask, topo, geom, poly_pix)
 
     # Cost array
     costgrid = _make_costgrid(glacier_mask, glacier_ext, topo)
@@ -720,20 +768,20 @@ def compute_centerlines(gdir, div_id=None):
         h_coord = np.asarray(h.xy)[::-1].astype(np.int64)
         indices, _ = route_through_array(costgrid, h_coord, t_coord)
         lines.append(shpg.LineString(np.array(indices)[:, [1, 0]]))
-    log.debug('%s: computed the routes', gdir.rgi_id)
+    log.debug('(%s) computed the routes', gdir.rgi_id)
 
     # Filter the shortest lines out
     dx_cls = cfg.PARAMS['flowline_dx']
     radius = cfg.PARAMS['flowline_junction_pix'] * dx_cls
     radius += 6 * dx_cls
     olines, _ = _filter_lines(lines, heads, cfg.PARAMS['kbuffer'], radius)
-    log.debug('%s: number of heads after lines filter: %d',
+    log.debug('(%s) number of heads after lines filter: %d',
               gdir.rgi_id, len(olines))
 
     # Filter the lines which are going up instead of down
     if do_filter_slope:
         olines = _filter_lines_slope(olines, topo, gdir)
-        log.debug('%s: number of heads after slope filter: %d',
+        log.debug('(%s) number of heads after slope filter: %d',
                   gdir.rgi_id, len(olines))
 
     # And rejoin the cutted tails
@@ -750,7 +798,7 @@ def compute_centerlines(gdir, div_id=None):
 
     # Final check
     if len(cls) == 0:
-        raise RuntimeError('{} : no centerline found!'.format(gdir.rgi_id))
+        raise RuntimeError('({}) no centerline found!'.format(gdir.rgi_id))
 
     # Write the data
     gdir.write_pickle(cls, 'centerlines', div_id=div_id)
@@ -943,7 +991,7 @@ def compute_downstream_lines(gdir):
 
     # Final check
     if len(cls) == 0:
-        raise RuntimeError('{} : problem by downstream!'.format(gdir.rgi_id))
+        raise RuntimeError('({}) problem by downstream!'.format(gdir.rgi_id))
 
     # Write the data
     gdir.write_pickle(cls, 'centerlines', div_id=0)
@@ -1084,24 +1132,29 @@ def _parabolic_bed_from_topo(gdir, idl, interpolator):
     bed = np.asarray(bed)
     assert len(bed) == idl.nx
     pvalid = np.sum(np.isfinite(bed)) / len(bed) * 100
-    log.debug('%s: percentage of valid parabolas total: %d',
+    log.debug('(%s) percentage of valid parabolas total: %d',
               gdir.rgi_id, int(pvalid))
 
     bedg = bed[~ idl.is_glacier]
     if len(bedg) > 0:
         pvalid = np.sum(np.isfinite(bedg)) / len(bedg) * 100
-        log.debug('%s: percentage of valid parabolas out glacier: %d',
+        log.debug('(%s) percentage of valid parabolas out glacier: %d',
                   gdir.rgi_id, int(pvalid))
         if pvalid < 10:
-            log.warning('{}: {}% of valid bedshapes.'.format(gdir.rgi_id,
-                                                             int(pvalid)))
+            log.warning('({}) {}% of valid bedshapes.'.format(gdir.rgi_id,
+                                                              int(pvalid)))
+
+    # Scale for dx (we worked in grid coords but need meters)
+    bed = bed / gdir.grid.dx**2
 
     # interpolation, filling the gaps
     default = cfg.PARAMS['default_parabolic_bedshape']
     bed_int = interp_nans(bed, default=default)
 
-    # Scale for dx (we worked in grid coords but need meters)
-    bed_int = bed_int / gdir.grid.dx**2
+    # We forbid super small shapes (important! This can lead to huge volumes)
+    # Sometimes the parabola fits in flat areas are very good, implying very
+    # flat parabolas.
+    bed_int = bed_int.clip(cfg.PARAMS['downstream_min_shape'])
 
     # Smoothing
     bed_ma = pdSeries(bed_int)
