@@ -1,12 +1,5 @@
 """Some useful functions that did not fit into the other modules.
 """
-from __future__ import absolute_import, division
-
-import six.moves.cPickle as pickle
-from six import string_types
-from six.moves.urllib.request import urlretrieve, urlopen
-from six.moves.urllib.error import HTTPError, URLError, ContentTooShortError
-from six.moves.urllib.parse import urlparse
 
 # Builtins
 import glob
@@ -18,6 +11,7 @@ import sys
 import math
 import datetime
 import logging
+import pickle
 from collections import OrderedDict
 from functools import partial, wraps
 import json
@@ -26,6 +20,9 @@ import fnmatch
 import platform
 import struct
 import importlib
+from urllib.request import urlretrieve, urlopen
+from urllib.error import HTTPError, URLError, ContentTooShortError
+from urllib.parse import urlparse
 
 # External libs
 import geopandas as gpd
@@ -58,7 +55,11 @@ from oggm.cfg import CUMSEC_IN_MONTHS, SEC_IN_YEAR, BEGINSEC_IN_MONTHS
 # Module logger
 logger = logging.getLogger(__name__)
 
+# Github repository and commit hash/branch name/tag name on that repository
+# The given commit will be downloaded from github and used as source for all sample data
 SAMPLE_DATA_GH_REPO = 'OGGM/oggm-sample-data'
+SAMPLE_DATA_COMMIT = 'e4e23891537040eb51e9e3325b1c604f05c99688'
+
 CRU_SERVER = 'https://crudata.uea.ac.uk/cru/data/hrg/cru_ts_3.24.01/cruts' \
              '.1701201703.v3.24.01/'
 
@@ -110,13 +111,16 @@ def _cached_download_helper(cache_obj_name, dl_func, reset=False):
     """Helper function for downloads.
 
     Takes care of checking if the file is already cached.
-    Only calls the actuall download function when no cached version exists.
+    Only calls the actual download function when no cached version exists.
     """
     cache_dir = cfg.PATHS['dl_cache_dir']
     cache_ro = cfg.PARAMS['dl_cache_readonly']
     fb_cache_dir = os.path.join(cfg.PATHS['working_dir'], 'cache')
 
     if not cache_dir:
+        # Defaults to working directory: it must be set!
+        if not cfg.PATHS['working_dir']:
+            raise ValueError("Need a valid PATHS['working_dir']!")
         cache_dir = fb_cache_dir
         cache_ro = False
 
@@ -428,67 +432,17 @@ def download_oggm_files():
 def _download_oggm_files_unlocked():
     """Checks if the demo data is already on the cache and downloads it."""
 
-    master_sha_url = 'https://api.github.com/repos/%s/commits/master' % \
-                     SAMPLE_DATA_GH_REPO
-    master_zip_url = 'https://github.com/%s/archive/master.zip' % \
-                     SAMPLE_DATA_GH_REPO
-    rename_output = False
-    shafile = os.path.join(cfg.CACHE_DIR, 'oggm-sample-data-commit.txt')
+    zip_url = 'https://github.com/%s/archive/%s.zip' % \
+              (SAMPLE_DATA_GH_REPO, SAMPLE_DATA_COMMIT)
     odir = os.path.join(cfg.CACHE_DIR)
-    sdir = os.path.join(cfg.CACHE_DIR, 'oggm-sample-data-master')
-
-    # a file containing the online's file's hash and the time of last check
-    if os.path.exists(shafile):
-        with open(shafile, 'r') as sfile:
-            local_sha = sfile.read().strip()
-        last_mod = os.path.getmtime(shafile)
-    else:
-        # very first download
-        local_sha = '0000'
-        last_mod = 0
-
-    # test only every hour
-    if (time.time() - last_mod) > 3600 and cfg.PARAMS['has_internet']:
-        write_sha = True
-        try:
-            # this might fail with HTTP 403 when server overload
-            resp = urlopen(master_sha_url)
-
-            # following try/finally is just for py2/3 compatibility
-            # https://mail.python.org/pipermail/python-list/2016-March/704073.html
-            try:
-                json_str = resp.read().decode('utf-8')
-            finally:
-                resp.close()
-            json_obj = json.loads(json_str)
-            master_sha = json_obj['sha']
-            # if not same, delete entire dir
-            if local_sha != master_sha:
-                empty_cache()
-            # use sha based download url to avoid cache issues
-            master_zip_url = 'https://github.com/%s/archive/%s.zip' % \
-                (SAMPLE_DATA_GH_REPO, master_sha)
-            rename_output = "oggm-sample-data-%s" % master_sha
-        except (HTTPError, URLError):
-            master_sha = 'error'
-            write_sha = False
-    else:
-        write_sha = False
+    sdir = os.path.join(cfg.CACHE_DIR, 'oggm-sample-data-%s' % SAMPLE_DATA_COMMIT)
 
     # download only if necessary
     if not os.path.exists(sdir):
-        ofile = file_downloader(master_zip_url)
+        ofile = file_downloader(zip_url)
         with zipfile.ZipFile(ofile) as zf:
             zf.extractall(odir)
-        # rename dir in case of download from different url
-        if rename_output:
-            fdir = os.path.join(cfg.CACHE_DIR, rename_output)
-            shutil.move(fdir, sdir)
-
-    # sha did change, replace
-    if write_sha:
-        with open(shafile, 'w') as sfile:
-            sfile.write(master_sha)
+        assert os.path.isdir(sdir)
 
     # list of files for output
     out = dict()
@@ -710,19 +664,17 @@ def _download_alternate_topo_file_unlocked(fname):
 def _get_centerline_lonlat(gdir):
     """Quick n dirty solution to write the centerlines as a shapefile"""
 
+    cls = gdir.read_pickle('centerlines')
     olist = []
-    for i in gdir.divide_ids:
-        cls = gdir.read_pickle('centerlines', div_id=i)
-        for j, cl in enumerate(cls[::-1]):
-            mm = 1 if j==0 else 0
-            gs = gpd.GeoSeries()
-            gs['RGIID'] = gdir.rgi_id
-            gs['DIVIDE'] = i
-            gs['LE_SEGMENT'] = np.rint(np.max(cl.dis_on_line) * gdir.grid.dx)
-            gs['MAIN'] = mm
-            tra_func = partial(gdir.grid.ij_to_crs, crs=wgs84)
-            gs['geometry'] = shp_trafo(tra_func, cl.line)
-            olist.append(gs)
+    for j, cl in enumerate(cls[::-1]):
+        mm = 1 if j==0 else 0
+        gs = gpd.GeoSeries()
+        gs['RGIID'] = gdir.rgi_id
+        gs['LE_SEGMENT'] = np.rint(np.max(cl.dis_on_line) * gdir.grid.dx)
+        gs['MAIN'] = mm
+        tra_func = partial(gdir.grid.ij_to_crs, crs=wgs84)
+        gs['geometry'] = shp_trafo(tra_func, cl.line)
+        olist.append(gs)
 
     return olist
 
@@ -1180,6 +1132,10 @@ def pipe_log(gdir, task_func_name, err=None):
 
     time_str = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
 
+    # Defaults to working directory: it must be set!
+    if not cfg.PATHS['working_dir']:
+        raise ValueError("Need a valid PATHS['working_dir']!")
+
     fpath = os.path.join(cfg.PATHS['working_dir'], 'log')
     mkdir(fpath)
 
@@ -1213,7 +1169,6 @@ def write_centerlines_to_shape(gdirs, filename):
     shema = dict()
     props = OrderedDict()
     props['RGIID'] = 'str:14'
-    props['DIVIDE'] = 'int:9'
     props['LE_SEGMENT'] = 'int:9'
     props['MAIN'] = 'int:9'
     shema['geometry'] = 'LineString'
@@ -1222,7 +1177,6 @@ def write_centerlines_to_shape(gdirs, filename):
     crs = {'init': 'epsg:4326'}
 
     # some writing function from geopandas rep
-    from six import iteritems
     from shapely.geometry import mapping
     import fiona
 
@@ -1231,7 +1185,7 @@ def write_centerlines_to_shape(gdirs, filename):
             'id': str(i),
             'type': 'Feature',
             'properties':
-                dict((k, v) for k, v in iteritems(row) if k != 'geometry'),
+                dict((k, v) for k, v in row.items() if k != 'geometry'),
             'geometry': mapping(row['geometry'])}
 
     with fiona.open(filename, 'w', driver='ESRI Shapefile',
@@ -1406,7 +1360,7 @@ def get_cru_cl_file():
 
     download_oggm_files()
 
-    sdir = os.path.join(cfg.CACHE_DIR, 'oggm-sample-data-master', 'cru')
+    sdir = os.path.join(cfg.CACHE_DIR, 'oggm-sample-data-%s' % SAMPLE_DATA_COMMIT, 'cru')
     fpath = os.path.join(sdir, 'cru_cl2.nc')
     if os.path.exists(fpath):
         return fpath
@@ -1437,7 +1391,7 @@ def get_wgms_files():
 
     # Roll our own
     download_oggm_files()
-    sdir = os.path.join(cfg.CACHE_DIR, 'oggm-sample-data-master', 'wgms')
+    sdir = os.path.join(cfg.CACHE_DIR, 'oggm-sample-data-%s' % SAMPLE_DATA_COMMIT, 'wgms')
     outf = os.path.join(sdir, 'rgi_wgms_links_20170217_RGIV5.csv')
     assert os.path.exists(outf)
     datadir = os.path.join(sdir, 'mbdata')
@@ -1461,7 +1415,7 @@ def get_glathida_file():
 
     # Roll our own
     download_oggm_files()
-    sdir = os.path.join(cfg.CACHE_DIR, 'oggm-sample-data-master', 'glathida')
+    sdir = os.path.join(cfg.CACHE_DIR, 'oggm-sample-data-%s' % SAMPLE_DATA_COMMIT, 'glathida')
     outf = os.path.join(sdir, 'rgi_glathida_links_2014_RGIV5.csv')
     assert os.path.exists(outf)
     return outf
@@ -1682,7 +1636,7 @@ def get_topo_file(lon_ex, lat_ex, rgi_region=None, source=None):
     tuple: (list with path(s) to the DEM file, data source)
     """
 
-    if source is not None and not isinstance(source, string_types):
+    if source is not None and not isinstance(source, str):
         # check all user options
         for s in source:
             demf, source_str = get_topo_file(lon_ex, lat_ex,
@@ -1877,8 +1831,8 @@ def glacier_characteristics(gdirs, filesuffix='', path=True):
         # The rest is less certain. We put this in a try block and see
         try:
             # Masks related stuff
-            if gdir.has_file('gridded_data', div_id=0):
-                fpath = gdir.get_filepath('gridded_data', div_id=0)
+            if gdir.has_file('gridded_data'):
+                fpath = gdir.get_filepath('gridded_data')
                 with netCDF4.Dataset(fpath) as nc:
                     mask = nc.variables['glacier_mask'][:]
                     topo = nc.variables['topo'][:]
@@ -1886,14 +1840,9 @@ def glacier_characteristics(gdirs, filesuffix='', path=True):
                 d['dem_max_elev'] = np.max(topo[np.where(mask == 1)])
                 d['dem_min_elev'] = np.min(topo[np.where(mask == 1)])
 
-            # Divides
-            d['n_divides'] = len(list(gdir.divide_ids))
-
             # Centerlines
-            if gdir.has_file('centerlines', div_id=1):
-                cls = []
-                for i in gdir.divide_ids:
-                    cls.extend(gdir.read_pickle('centerlines', div_id=i))
+            if gdir.has_file('centerlines'):
+                cls = gdir.read_pickle('centerlines')
                 longuest = 0.
                 for cl in cls:
                     longuest = np.max([longuest, cl.dis_on_line[-1]])
@@ -1901,23 +1850,20 @@ def glacier_characteristics(gdirs, filesuffix='', path=True):
                 d['longuest_centerline_km'] = longuest * gdir.grid.dx / 1000.
 
             # MB and flowline related stuff
-            if gdir.has_file('inversion_flowlines', div_id=1):
+            if gdir.has_file('inversion_flowlines'):
                 amb = np.array([])
                 h = np.array([])
                 widths = np.array([])
                 slope = np.array([])
-
-                for div_id in gdir.divide_ids:
-                    fls = gdir.read_pickle('inversion_flowlines',
-                                           div_id=div_id)
-                    dx = fls[0].dx * gdir.grid.dx
-                    for fl in fls:
-                        amb = np.append(amb, fl.apparent_mb)
-                        hgt = fl.surface_h
-                        h = np.append(h, hgt)
-                        widths = np.append(widths, fl.widths * dx)
-                        slope = np.append(slope,
-                                          np.arctan(-np.gradient(hgt, dx)))
+                fls = gdir.read_pickle('inversion_flowlines')
+                dx = fls[0].dx * gdir.grid.dx
+                for fl in fls:
+                    amb = np.append(amb, fl.apparent_mb)
+                    hgt = fl.surface_h
+                    h = np.append(h, hgt)
+                    widths = np.append(widths, fl.widths * dx)
+                    slope = np.append(slope,
+                                      np.arctan(-np.gradient(hgt, dx)))
 
                 pacc = np.where(amb >= 0)
                 pab = np.where(amb < 0)
@@ -1933,7 +1879,7 @@ def glacier_characteristics(gdirs, filesuffix='', path=True):
                 d['avg_slope'] = np.mean(slope)
 
             # Climate
-            if gdir.has_file('climate_monthly', div_id=0):
+            if gdir.has_file('climate_monthly'):
                 cf = gdir.get_filepath('climate_monthly')
                 with xr.open_dataset(cf) as cds:
                     d['clim_alt'] = cds.ref_hgt
@@ -1947,12 +1893,11 @@ def glacier_characteristics(gdirs, filesuffix='', path=True):
                     d['clim_prcp'] = cds.prcp.mean(dim='time').values * 12
 
             # Inversion
-            if gdir.has_file('inversion_output', div_id=1):
+            if gdir.has_file('inversion_output'):
                 vol = []
-                for i in gdir.divide_ids:
-                    cl = gdir.read_pickle('inversion_output', div_id=i)
-                    for c in cl:
-                        vol.extend(c['volume'])
+                cl = gdir.read_pickle('inversion_output')
+                for c in cl:
+                    vol.extend(c['volume'])
                 d['inv_volume_km3'] = np.nansum(vol) * 1e-9
                 area = gdir.rgi_area_km2
                 d['inv_thickness_m'] = d['inv_volume_km3'] / area * 1000
@@ -1960,14 +1905,13 @@ def glacier_characteristics(gdirs, filesuffix='', path=True):
                 d['vas_thickness_m'] = d['vas_volume_km3'] / area * 1000
 
             # Calving
-            if gdir.has_file('calving_output', div_id=1):
+            if gdir.has_file('calving_output'):
                 all_calving_data = []
                 all_width = []
-                for i in gdir.divide_ids:
-                    cl = gdir.read_pickle('calving_output', div_id=i)
-                    for c in cl:
-                        all_calving_data = c['calving_fluxes'][-1]
-                        all_width = c['t_width']
+                cl = gdir.read_pickle('calving_output')
+                for c in cl:
+                    all_calving_data = c['calving_fluxes'][-1]
+                    all_width = c['t_width']
                 d['calving_flux'] = all_calving_data
                 d['calving_front_width'] = all_width
             else:
@@ -2034,7 +1978,7 @@ class entity_task(object):
         task_func.__doc__ = '\n'.join((task_func.__doc__, self.iodoc))
 
         @wraps(task_func)
-        def _entity_task(gdir, reset=None, **kwargs):
+        def _entity_task(gdir, reset=None, print_log=True, **kwargs):
 
             if reset is None:
                 reset = not cfg.PARAMS['auto_skip_task']
@@ -2045,7 +1989,7 @@ class entity_task(object):
                 return
 
             # Log what we are doing
-            if not task_func.__dict__.get('divide_task', False):
+            if print_log:
                 self.log.info('(%s) %s', gdir.rgi_id, task_func.__name__)
 
             # Run the task
@@ -2062,58 +2006,16 @@ class entity_task(object):
                 if fsuffix:
                     task_func_name += fsuffix
                 pipe_log(gdir, task_func_name, err=err)
-                self.log.error('%s occurred during task %s on %s!',
-                        type(err).__name__, task_func.__name__, gdir.rgi_id)
+                if print_log:
+                    self.log.error('%s occurred during task %s on %s!',
+                                   type(err).__name__, task_func.__name__,
+                                   gdir.rgi_id)
                 if not cfg.PARAMS['continue_on_error']:
                     raise
             return out
 
         _entity_task.__dict__['is_entity_task'] = True
         return _entity_task
-
-
-class divide_task(object):
-    """Decorator for common logic on divides.
-
-    Simply calls the decorated task once for each divide.
-    """
-
-    def __init__(self, log, add_0=False):
-        """Decorator
-
-        Parameters
-        ----------
-        add_0: bool, default=False
-            If the task also needs to be run on divide 0
-        """
-        self.log = log
-        self.add_0 = add_0
-        self._cdoc = """"
-            div_id : int
-                the ID of the divide to process. Should be left to the default
-                ``None`` unless you know what you do.
-        """
-
-    def __call__(self, task_func):
-        """Decorate."""
-
-        @wraps(task_func)
-        def _divide_task(gdir, div_id=None, **kwargs):
-            if div_id is None:
-                ids = gdir.divide_ids
-                if self.add_0:
-                    ids = list(ids) + [0]
-                for i in ids:
-                    self.log.info('(%s) %s, divide %d', gdir.rgi_id,
-                                  task_func.__name__, i)
-                    task_func(gdir, div_id=i, **kwargs)
-            else:
-                # For testing only
-                task_func(gdir, div_id=div_id, **kwargs)
-
-        # For the logger later on
-        _divide_task.__dict__['divide_task'] = True
-        return _divide_task
 
 
 def global_task(task_func):
@@ -2154,8 +2056,7 @@ class GlacierDirectory(object):
 
     If the directory does not exist, it will be created.
 
-    A glacier entity has one or more divides. See :ref:`glacierdir`
-    for more information.
+    See :ref:`glacierdir` for more information.
 
     Attributes
     ----------
@@ -2205,13 +2106,29 @@ class GlacierDirectory(object):
         """
 
         if base_dir is None:
+            if not cfg.PATHS.get('working_dir', None):
+                raise ValueError("Need a valid PATHS['working_dir']!")
             base_dir = os.path.join(cfg.PATHS['working_dir'], 'per_glacier')
 
         # RGI IDs are also valid entries
-        if isinstance(rgi_entity, string_types):
+        if isinstance(rgi_entity, str):
             _shp = os.path.join(base_dir, rgi_entity[:8], rgi_entity[:11],
                                 rgi_entity, 'outlines.shp')
-            rgi_entity = read_shapefile(_shp).iloc[0]
+            rgi_entity = read_shapefile(_shp)
+            crs = salem.check_crs(rgi_entity.crs)
+            rgi_entity = rgi_entity.iloc[0]
+            xx, yy = salem.transform_proj(crs, salem.wgs84,
+                                          [rgi_entity['min_x'],
+                                           rgi_entity['max_x']],
+                                          [rgi_entity['min_y'],
+                                           rgi_entity['max_y']])
+        else:
+            g = rgi_entity['geometry']
+            xx, yy = ([g.bounds[0], g.bounds[2]],
+                      [g.bounds[1], g.bounds[3]])
+
+        # Extent of the glacier in lon/lat
+        self.extent_ll = [xx, yy]
 
         try:
             # Assume RGI V4
@@ -2326,23 +2243,6 @@ class GlacierDirectory(object):
         """The glacier's RGI area (m2)."""
         return self.rgi_area_km2 * 10**6
 
-    @property
-    def divide_dirs(self):
-        """List of the glacier divides directories"""
-        dirs = [self.dir]
-        dirs += sorted(glob.glob(os.path.join(self.dir, 'divide_*')))
-        return dirs
-
-    @property
-    def n_divides(self):
-        """Number of glacier divides"""
-        return len(self.divide_dirs)-1
-
-    @property
-    def divide_ids(self):
-        """Iterator over the glacier divides ids"""
-        return range(1, self.n_divides+1)
-
     def copy_to_basedir(self, base_dir, setup='run'):
         """Copies the glacier directory and its content to a new location.
 
@@ -2374,17 +2274,13 @@ class GlacierDirectory(object):
         else:
             raise ValueError('setup not understood: {}'.format(setup))
 
-    def get_filepath(self, filename, div_id=0, delete=False, filesuffix=''):
+    def get_filepath(self, filename, delete=False, filesuffix=''):
         """Absolute path to a specific file.
 
         Parameters
         ----------
         filename : str
             file name (must be listed in cfg.BASENAME)
-        div_id : int or str
-            the divide for which you want to get the file path (set to
-            'major' to get the major divide according to
-            compute_downstream_lines)
         delete : bool
             delete the file if exists
         filesuffix : str
@@ -2399,42 +2295,34 @@ class GlacierDirectory(object):
         if filename not in cfg.BASENAMES:
             raise ValueError(filename + ' not in cfg.BASENAMES.')
 
-        if div_id == 'major':
-            div_id = self.read_pickle('major_divide', div_id=0)
-
-        dir = self.divide_dirs[div_id]
         fname = cfg.BASENAMES[filename]
         if filesuffix:
             fname = fname.split('.')
             assert len(fname) == 2
             fname = fname[0] + filesuffix + '.' + fname[1]
-        out = os.path.join(dir, fname)
+        out = os.path.join(self.dir, fname)
         if delete and os.path.isfile(out):
             os.remove(out)
         return out
 
-    def has_file(self, filename, div_id=0):
+    def has_file(self, filename):
         """Checks if a file exists.
 
         Parameters
         ----------
         filename : str
             file name (must be listed in cfg.BASENAME)
-        div_id : int
-            the divide for which you want to get the file path
         """
 
-        return os.path.exists(self.get_filepath(filename, div_id=div_id))
+        return os.path.exists(self.get_filepath(filename))
 
-    def read_pickle(self, filename, div_id=0, use_compression=None):
+    def read_pickle(self, filename, use_compression=None):
         """Reads a pickle located in the directory.
 
         Parameters
         ----------
         filename : str
             file name (must be listed in cfg.BASENAME)
-        div_id : int
-            the divide for which you want to get the file path
         use_compression : bool
             whether or not the file ws compressed. Default is to use
             cfg.PARAMS['use_compression'] for this (recommended)
@@ -2445,12 +2333,12 @@ class GlacierDirectory(object):
         use_comp = (use_compression if use_compression is not None
                     else cfg.PARAMS['use_compression'])
         _open = gzip.open if use_comp else open
-        with _open(self.get_filepath(filename, div_id), 'rb') as f:
+        with _open(self.get_filepath(filename), 'rb') as f:
             out = pickle.load(f)
 
         return out
 
-    def write_pickle(self, var, filename, div_id=0, use_compression=None):
+    def write_pickle(self, var, filename, use_compression=None):
         """ Writes a variable to a pickle on disk.
 
         Parameters
@@ -2459,8 +2347,6 @@ class GlacierDirectory(object):
             the variable to write to disk
         filename : str
             file name (must be listed in cfg.BASENAME)
-        div_id : int
-            the divide for which you want to get the file path
         use_compression : bool
             whether or not the file ws compressed. Default is to use
             cfg.PARAMS['use_compression'] for this (recommended)
@@ -2468,10 +2354,10 @@ class GlacierDirectory(object):
         use_comp = (use_compression if use_compression is not None
                     else cfg.PARAMS['use_compression'])
         _open = gzip.open if use_comp else open
-        with _open(self.get_filepath(filename, div_id), 'wb') as f:
+        with _open(self.get_filepath(filename), 'wb') as f:
             pickle.dump(var, f, protocol=-1)
 
-    def create_gridded_ncdf_file(self, fname, div_id=0):
+    def create_gridded_ncdf_file(self, fname):
         """Makes a gridded netcdf file template.
 
         The other variables have to be created and filled by the calling
@@ -2481,8 +2367,6 @@ class GlacierDirectory(object):
         ----------
         filename : str
             file name (must be listed in cfg.BASENAME)
-        div_id : int
-            the divide for which you want to get the file path
 
         Returns
         -------
@@ -2490,7 +2374,7 @@ class GlacierDirectory(object):
         """
 
         # overwrite as default
-        fpath = self.get_filepath(fname, div_id)
+        fpath = self.get_filepath(fname)
         if os.path.exists(fpath):
             os.remove(fpath)
 
@@ -2580,13 +2464,11 @@ class GlacierDirectory(object):
             v.long_name = 'temperature gradient'
             v[:] = grad
 
-    def get_inversion_flowline_hw(self, div_id=None):
+    def get_inversion_flowline_hw(self):
         """ Shortcut function to read the heights and widths of the glacier.
 
         Parameters
         ----------
-        div_id : int
-            the divide you want the data for. Default to use all divides.
 
         Returns
         -------
@@ -2595,15 +2477,10 @@ class GlacierDirectory(object):
 
         h = np.array([])
         w = np.array([])
-
-        if div_id is None:
-            div_id = self.divide_ids
-
-        for div_id in np.atleast_1d(div_id):
-            fls = self.read_pickle('inversion_flowlines', div_id=div_id)
-            for fl in fls:
-                w = np.append(w, fl.widths)
-                h = np.append(h, fl.surface_h)
+        fls = self.read_pickle('inversion_flowlines')
+        for fl in fls:
+            w = np.append(w, fl.widths)
+            h = np.append(h, fl.surface_h)
         return h, w * fl.dx * self.grid.dx
 
     def get_ref_mb_data(self):
@@ -2630,6 +2507,29 @@ class GlacierDirectory(object):
         y1 = y1 or ci['hydro_yr_1']
         out = self._mbdf.loc[y0:y1]
         return out.dropna(subset=['ANNUAL_BALANCE'])
+
+    def get_ref_length_data(self):
+        """Get the glacier lenght data from P. Leclercq's data base.
+
+         https://folk.uio.no/paulwl/data.php
+
+         For some glaciers only!
+         """
+
+        df = pd.read_csv(get_demo_file('rgi_leclercq_links_2012_RGIV5.csv'))
+        df = df.loc[df.RGI_ID == self.rgi_id]
+        if len(df) == 0:
+            raise RuntimeError('No length data found for this glacier!')
+        ide = df.LID.values[0]
+
+        f = get_demo_file('Glacier_Lengths_Leclercq.nc')
+        with xr.open_dataset(f) as dsg:
+            # The database is not sorted by ID. Don't ask me...
+            grp_id = np.argwhere(dsg['index'].values == ide)[0][0] + 1
+        with xr.open_dataset(f, group=str(grp_id)) as ds:
+            df = ds.to_dataframe()
+            df.name = ds.glacier_name
+        return df
 
     def log(self, func, err=None):
         """Logs a message to the glacier directory.

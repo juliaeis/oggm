@@ -3,22 +3,16 @@ use a precalibrated list of tstars for the run, i.e. won't calibrate the mass
 balance anymore.
 """
 
+# Module logger
+import logging
 # Python imports
 import os
 import shutil
-import zipfile
 from glob import glob
-import oggm
 
-# Module logger
-import logging
 log = logging.getLogger(__name__)
 
 # Libs
-import oggm
-import numpy as np
-import pandas as pd
-import geopandas as gpd
 import matplotlib.pyplot as plt
 import salem
 
@@ -28,7 +22,7 @@ from oggm import workflow
 from oggm import tasks
 from oggm.workflow import execute_entity_task
 from oggm import graphics, utils
-from oggm.core.models import flowline
+from oggm.core import flowline
 
 # Time
 import time
@@ -132,7 +126,7 @@ gdirs = workflow.init_glacier_regions(rgidf)
 task_list = [
     tasks.glacier_masks,
     tasks.compute_centerlines,
-    tasks.compute_downstream_lines,
+    tasks.compute_downstream_line,
     tasks.initialize_flowlines,
     tasks.compute_downstream_bedshape,
     tasks.catchment_area,
@@ -146,11 +140,11 @@ for task in task_list:
 # Climate tasks -- only data preparation and tstar interpolation!
 execute_entity_task(tasks.process_cru_data, gdirs)
 tasks.distribute_t_stars(gdirs)
+execute_entity_task(tasks.apparent_mb, gdirs)
 
 # Inversion tasks
 execute_entity_task(tasks.prepare_for_inversion, gdirs)
-execute_entity_task(tasks.volume_inversion, gdirs,
-                    use_cfg_params={'glen_a': cfg.A, 'fs': 0})
+execute_entity_task(tasks.volume_inversion, gdirs, glen_a=cfg.A, fs=0)
 execute_entity_task(tasks.filter_inversion_output, gdirs)
 execute_entity_task(tasks.init_present_time_glacier, gdirs)
 

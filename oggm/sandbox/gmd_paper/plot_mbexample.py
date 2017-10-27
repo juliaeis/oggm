@@ -1,16 +1,17 @@
 import os
+
 import geopandas as gpd
-import oggm
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import xarray as xr
-import matplotlib.pyplot as plt
+
+import oggm
 from oggm import cfg, tasks
-from oggm.utils import get_demo_file
-from oggm.core.preprocessing.climate import (mb_yearly_climate_on_glacier,
-                                             t_star_from_refmb,
-                                             local_mustar_apparent_mb)
+from oggm.core.climate import (mb_yearly_climate_on_glacier,
+                               t_star_from_refmb, local_mustar, apparent_mb)
 from oggm.sandbox.gmd_paper import PLOT_DIR
+from oggm.utils import get_demo_file
 
 cfg.initialize()
 cfg.PATHS['dem_file'] = get_demo_file('hef_srtm.tif')
@@ -20,12 +21,11 @@ cfg.PARAMS['auto_skip_task'] = True
 
 base_dir = os.path.join(os.path.expanduser('~/tmp'), 'OGGM_GMD', 'MB')
 entity = gpd.read_file(get_demo_file('Hintereisferner.shp')).iloc[0]
-gdir = oggm.GlacierDirectory(entity, base_dir=base_dir)
+gdir = oggm.GlacierDirectory(entity, base_dir=base_dir, reset=True)
 
 tasks.define_glacier_region(gdir, entity=entity)
 tasks.glacier_masks(gdir)
 tasks.compute_centerlines(gdir)
-tasks.compute_downstream_lines(gdir)
 tasks.initialize_flowlines(gdir)
 tasks.catchment_area(gdir)
 tasks.catchment_width_geom(gdir)
@@ -36,12 +36,13 @@ tasks.mu_candidates(gdir)
 
 mbdf = gdir.get_ref_mb_data()
 res = t_star_from_refmb(gdir, mbdf.ANNUAL_BALANCE)
-local_mustar_apparent_mb(gdir, tstar=res['t_star'][-1], bias=res['bias'][-1],
-                         prcp_fac=res['prcp_fac'])
+local_mustar(gdir, tstar=res['t_star'][-1], bias=res['bias'][-1],
+             prcp_fac=res['prcp_fac'], reset=True)
+apparent_mb(gdir, reset=True)
 
 # For plots
 mu_yr_clim = gdir.read_pickle('mu_candidates')[pcp_fac]
-years, temp_yr, prcp_yr = mb_yearly_climate_on_glacier(gdir, pcp_fac, div_id=0)
+years, temp_yr, prcp_yr = mb_yearly_climate_on_glacier(gdir, pcp_fac)
 
 # which years to look at
 selind = np.searchsorted(years, mbdf.index)

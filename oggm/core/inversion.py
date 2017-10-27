@@ -24,9 +24,6 @@ Bahr  Pfeffer, W. T., Kaser, G., D. B.: Glacier volume estimation as an
     ill-posed boundary value problem, Cryosph. Discuss. Cryosph. Discuss.,
     6(6), 5405-5420, doi:10.5194/tcd-6-5405-2012, 2012.
 """
-from __future__ import division
-from six.moves import zip
-
 # Built ins
 import logging
 import os
@@ -39,16 +36,15 @@ from scipy.ndimage.morphology import distance_transform_edt
 from scipy.interpolate import griddata
 # Locals
 from oggm import utils, cfg
-from oggm import entity_task, divide_task, global_task
-from oggm.core.preprocessing.gis import gaussian_blur
+from oggm import entity_task, global_task
+from oggm.core.gis import gaussian_blur
 
 # Module logger
 log = logging.getLogger(__name__)
 
 
 @entity_task(log, writes=['inversion_input'])
-@divide_task(log, add_0=False)
-def prepare_for_inversion(gdir, div_id=None, add_debug_var=False,
+def prepare_for_inversion(gdir, add_debug_var=False,
                           invert_with_rectangular=True,
                           invert_all_rectangular=False):
     """Prepares the data needed for the inversion.
@@ -62,7 +58,7 @@ def prepare_for_inversion(gdir, div_id=None, add_debug_var=False,
     """
 
     # variables
-    fls = gdir.read_pickle('inversion_flowlines', div_id=div_id)
+    fls = gdir.read_pickle('inversion_flowlines')
 
     # for testing only
     if 'invert_with_rectangular' in cfg.PARAMS:
@@ -120,7 +116,7 @@ def prepare_for_inversion(gdir, div_id=None, add_debug_var=False,
         towrite.append(cl_dic)
 
     # Write out
-    gdir.write_pickle(towrite, 'inversion_input', div_id=div_id)
+    gdir.write_pickle(towrite, 'inversion_input')
 
 
 def _inversion_poly(a3, a0):
@@ -172,40 +168,40 @@ def mass_conservation_inversion(gdir, glen_a=cfg.A, fs=0., write=True):
     clip_angle = cfg.PARAMS['min_slope']
 
     out_volume = 0.
-    for div in gdir.divide_ids:
-        cls = gdir.read_pickle('inversion_input', div_id=div)
-        for cl in cls:
-            # Clip slope to avoid negative and small slopes
-            slope = cl['slope_angle']
-            slope = np.clip(slope, np.deg2rad(clip_angle), np.pi/2.)
 
-            # Parabolic bed rock
-            w = cl['width']
-            a0s = - cl['flux_a0'] / ((cfg.RHO*cfg.G*slope)**3*fd)
+    cls = gdir.read_pickle('inversion_input')
+    for cl in cls:
+        # Clip slope to avoid negative and small slopes
+        slope = cl['slope_angle']
+        slope = np.clip(slope, np.deg2rad(clip_angle), np.pi/2.)
 
-            if np.any(~np.isfinite(a0s)):
-                raise RuntimeError('({}) something went wrong with the '
-                                   'inversion'.format(gdir.rgi_id))
+        # Parabolic bed rock
+        w = cl['width']
+        a0s = - cl['flux_a0'] / ((cfg.RHO*cfg.G*slope)**3*fd)
 
-            # GO
-            out_thick = np.zeros(len(slope))
-            for i, (a0, Q) in enumerate(zip(a0s, cl['flux_a0'])):
-                if Q > 0.:
-                    out_thick[i] = _inv_function(a3, a0)
-                else:
-                    out_thick[i] = 0.
-            assert np.all(np.isfinite(out_thick))
+        if np.any(~np.isfinite(a0s)):
+            raise RuntimeError('({}) something went wrong with the '
+                               'inversion'.format(gdir.rgi_id))
 
-            # volume
-            fac = np.where(cl['is_rectangular'], 1, cfg.TWO_THIRDS)
-            volume = fac * out_thick * w * cl['dx']
+        # GO
+        out_thick = np.zeros(len(slope))
+        for i, (a0, Q) in enumerate(zip(a0s, cl['flux_a0'])):
+            if Q > 0.:
+                out_thick[i] = _inv_function(a3, a0)
+            else:
+                out_thick[i] = 0.
+        assert np.all(np.isfinite(out_thick))
 
-            if write:
-                cl['thick'] = out_thick
-                cl['volume'] = volume
-            out_volume += np.sum(volume)
+        # volume
+        fac = np.where(cl['is_rectangular'], 1, cfg.TWO_THIRDS)
+        volume = fac * out_thick * w * cl['dx']
+
         if write:
-            gdir.write_pickle(cls, 'inversion_output', div_id=div)
+            cl['thick'] = out_thick
+            cl['volume'] = volume
+        out_volume += np.sum(volume)
+    if write:
+        gdir.write_pickle(cls, 'inversion_output')
 
     return out_volume, gdir.rgi_area_km2 * 1e6
 
@@ -225,8 +221,8 @@ def optimize_inversion_params(gdirs):
 
     # Do we even need to do this?
     if not cfg.PARAMS['optimize_inversion_params']:
-        log.info('User did not want to optimize the inversion params')
-        return
+        raise RuntimeError('User did not want to optimize the '
+                           'inversion params')
 
     # Get test glaciers (all glaciers with thickness data)
     fpath = utils.get_glathida_file()
@@ -363,28 +359,34 @@ def optimize_inversion_params(gdirs):
 
 
 @entity_task(log, writes=['inversion_output'])
-def volume_inversion(gdir, use_cfg_params=None):
+def volume_inversion(gdir, glen_a=None, fs=None):
     """Computes the inversion the glacier.
 
-    If fs and fd are not given, it will use the optimized params.
+    If glen_a and fs are not given, it will use the optimized params.
 
     Parameters
     ----------
     gdir : oggm.GlacierDirectory
-    use_cfg_params : set to a dict of params (experimental)
+    glen_a : float, optional
+        the ice creep parameter (defaults to cfg.PARAMS['inversion_glen_a'])
+    fs : float, optional
+        the sliding parameter (defaults to cfg.PARAMS['inversion_fs'])
     """
 
-    if use_cfg_params is not None:
-        fs = use_cfg_params['fs']
-        glen_a = use_cfg_params['glen_a']
-    elif not cfg.PARAMS['optimize_inversion_params']:
-        fs = cfg.PARAMS['inversion_fs']
-        glen_a =cfg.PARAMS['inversion_glen_a']
-    else:
+    if fs is not None and glen_a is None:
+        raise ValueError('Cannot set fs without glen_a.')
+
+    if glen_a is None and cfg.PARAMS['optimize_inversion_params']:
         # use the optimized ones
         d = gdir.read_pickle('inversion_params')
         fs = d['fs']
         glen_a = d['glen_a']
+
+    if glen_a is None:
+        glen_a = cfg.PARAMS['inversion_glen_a']
+
+    if fs is None:
+        fs = cfg.PARAMS['inversion_fs']
 
     # go
     return mass_conservation_inversion(gdir, glen_a=glen_a, fs=fs, write=True)
@@ -395,40 +397,39 @@ def filter_inversion_output(gdir):
     """Filters the last few grid point whilst conserving total volume.
     """
 
-    for div in gdir.divide_ids:
-        cls = gdir.read_pickle('inversion_output', div_id=div)
-        for cl in cls:
+    cls = gdir.read_pickle('inversion_output')
+    for cl in cls:
 
-            init_vol = np.sum(cl['volume'])
-            if init_vol == 0 or gdir.is_tidewater or not cl['is_last']:
-                continue
+        init_vol = np.sum(cl['volume'])
+        if init_vol == 0 or gdir.is_tidewater or not cl['is_last']:
+            continue
 
-            w = cl['width']
-            out_thick = cl['thick']
-            fac = np.where(cl['is_rectangular'], 1, cfg.TWO_THIRDS)
+        w = cl['width']
+        out_thick = cl['thick']
+        fac = np.where(cl['is_rectangular'], 1, cfg.TWO_THIRDS)
 
-            # Last thicknesses can be noisy sometimes: interpolate
-            out_thick[-4:] = np.NaN
-            out_thick = utils.interp_nans(np.append(out_thick, 0))[:-1]
-            assert len(out_thick) == len(fac)
+        # Last thicknesses can be noisy sometimes: interpolate
+        out_thick[-4:] = np.NaN
+        out_thick = utils.interp_nans(np.append(out_thick, 0))[:-1]
+        assert len(out_thick) == len(fac)
 
-            # final volume
-            volume = fac * out_thick * w * cl['dx']
+        # final volume
+        volume = fac * out_thick * w * cl['dx']
 
-            # conserve it
-            new_vol = np.nansum(volume)
-            assert new_vol != 0
-            volume = init_vol / new_vol * volume
-            np.testing.assert_allclose(np.nansum(volume), init_vol)
+        # conserve it
+        new_vol = np.nansum(volume)
+        assert new_vol != 0
+        volume = init_vol / new_vol * volume
+        np.testing.assert_allclose(np.nansum(volume), init_vol)
 
-            # recompute thickness on that base
-            out_thick = volume / (fac * w * cl['dx'])
+        # recompute thickness on that base
+        out_thick = volume / (fac * w * cl['dx'])
 
-            # output
-            cl['thick'] = out_thick
-            cl['volume'] = volume
+        # output
+        cl['thick'] = out_thick
+        cl['volume'] = volume
 
-        gdir.write_pickle(cls, 'inversion_output', div_id=div)
+    gdir.write_pickle(cls, 'inversion_output')
 
 
 def _distribute_thickness_per_altitude(glacier_mask, topo, cls, fls, grid,
@@ -559,7 +560,6 @@ def distribute_thickness(gdir, how='', add_slope=True, smooth=True,
 
     Parameters
     ----------
-    gdir : oggm.GlacierDirectory
     """
 
     if how == 'per_altitude':
@@ -569,37 +569,18 @@ def distribute_thickness(gdir, how='', add_slope=True, smooth=True,
     else:
         raise ValueError('interpolation method not understood')
 
-    # Different behavior for ice-caps
-    if gdir.glacier_type == 'Ice cap':
-        glacier_mask = 0.
-        cls, fls = [], []
-        for div_id in gdir.divide_ids:
-            # Variables
-            grids_file = gdir.get_filepath('gridded_data', div_id=div_id)
-            with netCDF4.Dataset(grids_file) as nc:
-                glacier_mask += nc.variables['glacier_mask'][:]
-                topo = nc.variables['topo_smoothed'][:]
-            cls.extend(gdir.read_pickle('inversion_output', div_id=div_id))
-            fls.extend(gdir.read_pickle('inversion_flowlines', div_id=div_id))
-        # One call for all divides
-        glacier_mask = np.clip(glacier_mask, 0, 1)
-        thick = inv_g(glacier_mask, topo, cls, fls, gdir.grid,
-                      add_slope=add_slope, smooth=smooth)
-    else:
-        thick = 0.
-        for div_id in gdir.divide_ids:
-            # Variables
-            grids_file = gdir.get_filepath('gridded_data', div_id=div_id)
-            with netCDF4.Dataset(grids_file) as nc:
-                glacier_mask = nc.variables['glacier_mask'][:]
-                topo = nc.variables['topo_smoothed'][:]
-            cls = gdir.read_pickle('inversion_output', div_id=div_id)
-            fls = gdir.read_pickle('inversion_flowlines', div_id=div_id)
-            _h = inv_g(glacier_mask, topo, cls, fls, gdir.grid,
-                       add_slope=add_slope, smooth=smooth)
-            thick += _h
 
-    # write to divide 0
+    # Variables
+    grids_file = gdir.get_filepath('gridded_data')
+    with netCDF4.Dataset(grids_file) as nc:
+        glacier_mask = nc.variables['glacier_mask'][:]
+        topo = nc.variables['topo_smoothed'][:]
+    cls = gdir.read_pickle('inversion_output')
+    fls = gdir.read_pickle('inversion_flowlines')
+    thick = inv_g(glacier_mask, topo, cls, fls, gdir.grid,
+                  add_slope=add_slope, smooth=smooth)
+
+    # write
     grids_file = gdir.get_filepath('gridded_data')
     with netCDF4.Dataset(grids_file, 'a') as nc:
         vn = 'thickness'

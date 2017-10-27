@@ -2,31 +2,23 @@
 
 
 """
-from __future__ import division
-from six.moves import zip
-
-# Built ins
+# Builtins
 import logging
 import warnings
 import copy
-from functools import partial
 from collections import OrderedDict
 
 # External libs
 import numpy as np
-import netCDF4
-from scipy.interpolate import RegularGridInterpolator
 import shapely.geometry as shpg
 import xarray as xr
 
 # Locals
 import oggm.cfg as cfg
 from oggm import utils
-import oggm.core.preprocessing.geometry
-import oggm.core.preprocessing.centerlines
-import oggm.core.models.massbalance as mbmods
 from oggm import entity_task
-from oggm.core.preprocessing.centerlines import Centerline
+import oggm.core.massbalance as mbmods
+from oggm.core.centerlines import Centerline, line_order
 
 # Constants
 from oggm.cfg import SEC_IN_DAY, SEC_IN_YEAR, TWO_THIRDS, SEC_IN_HOUR
@@ -36,7 +28,7 @@ from oggm.cfg import RHO, G, N, GAUSSIAN_KERNEL
 log = logging.getLogger(__name__)
 
 
-class ModelFlowline(Centerline):
+class Flowline(Centerline):
     """The is the input flowline for the model."""
 
     def __init__(self, line=None, dx=1, map_dx=None,
@@ -54,7 +46,7 @@ class ModelFlowline(Centerline):
             coords = np.arange(0, len(surface_h)-0.5, dx)
             line = shpg.LineString(np.vstack([coords, coords*0.]).T)
 
-        super(ModelFlowline, self).__init__(line, dx, surface_h)
+        super(Flowline, self).__init__(line, dx, surface_h)
 
         self._thick = (surface_h - bed_h).clip(0.)
         self.map_dx = map_dx
@@ -123,7 +115,7 @@ class ModelFlowline(Centerline):
         return ds
 
 
-class ParabolicFlowline(ModelFlowline):
+class ParabolicBedFlowline(Flowline):
     """A more advanced Flowline."""
 
     def __init__(self, line=None, dx=None, map_dx=None,
@@ -138,8 +130,8 @@ class ParabolicFlowline(ModelFlowline):
         ----------
         #TODO: document properties
         """
-        super(ParabolicFlowline, self).__init__(line, dx, map_dx,
-                                                surface_h, bed_h)
+        super(ParabolicBedFlowline, self).__init__(line, dx, map_dx,
+                                                   surface_h, bed_h)
 
         assert np.all(np.isfinite(bed_shape))
         self.bed_shape = bed_shape
@@ -162,7 +154,7 @@ class ParabolicFlowline(ModelFlowline):
         ds['bed_shape'] = (['x'],  self.bed_shape)
 
 
-class VerticalWallFlowline(ModelFlowline):
+class RectangularBedFlowline(Flowline):
     """A more advanced Flowline."""
 
     def __init__(self, line=None, dx=None, map_dx=None,
@@ -177,8 +169,8 @@ class VerticalWallFlowline(ModelFlowline):
         ----------
         #TODO: document properties
         """
-        super(VerticalWallFlowline, self).__init__(line, dx, map_dx,
-                                                   surface_h, bed_h)
+        super(RectangularBedFlowline, self).__init__(line, dx, map_dx,
+                                                     surface_h, bed_h)
 
         self._widths = widths
 
@@ -205,7 +197,7 @@ class VerticalWallFlowline(ModelFlowline):
         ds['widths'] = (['x'],  self._widths)
 
 
-class TrapezoidalFlowline(ModelFlowline):
+class TrapezoidalBedFlowline(Flowline):
     """A more advanced Flowline."""
 
     def __init__(self, line=None, dx=None, map_dx=None, surface_h=None,
@@ -220,8 +212,8 @@ class TrapezoidalFlowline(ModelFlowline):
         ----------
         #TODO: document properties
         """
-        super(TrapezoidalFlowline, self).__init__(line, dx, map_dx,
-                                                   surface_h, bed_h)
+        super(TrapezoidalBedFlowline, self).__init__(line, dx, map_dx,
+                                                     surface_h, bed_h)
 
         self._w0_m = widths * self.map_dx - lambdas * self.thick
 
@@ -261,7 +253,7 @@ class TrapezoidalFlowline(ModelFlowline):
         ds['lambdas'] = (['x'],  self._lambdas)
 
 
-class MixedFlowline(ModelFlowline):
+class MixedBedFlowline(Flowline):
     """A more advanced Flowline."""
 
     def __init__(self, *, line=None, dx=None, map_dx=None, surface_h=None,
@@ -279,9 +271,9 @@ class MixedFlowline(ModelFlowline):
         width_m is optional - for thick=0
         """
 
-        super(MixedFlowline, self).__init__(line=line, dx=dx, map_dx=map_dx,
-                                            surface_h=surface_h.copy(),
-                                            bed_h=bed_h.copy())
+        super(MixedBedFlowline, self).__init__(line=line, dx=dx, map_dx=map_dx,
+                                               surface_h=surface_h.copy(),
+                                               bed_h=bed_h.copy())
 
         # To speedup calculations if no trapezoid bed is present
         self._do_trapeze = np.any(is_trapezoid)
@@ -341,9 +333,9 @@ class MixedFlowline(ModelFlowline):
     def section(self):
         out = TWO_THIRDS * self.widths_m * self.thick
         if self._do_trapeze:
-            out[self._ptrap] = (self.widths_m[self._ptrap] + \
-                                self._w0_m[self._ptrap]) / 2 \
-                                * self.thick[self._ptrap]
+            out[self._ptrap] = ((self.widths_m[self._ptrap] +
+                                 self._w0_m[self._ptrap]) / 2 *
+                                self.thick[self._ptrap])
         return out
 
     @section.setter
@@ -353,7 +345,8 @@ class MixedFlowline(ModelFlowline):
             b = 2 * self._w0_m[self._ptrap]
             a = 2 * self._lambdas[self._ptrap]
             with np.errstate(divide='ignore', invalid='ignore'):
-                out[self._ptrap] = (np.sqrt(b ** 2 + 4 * a * val[self._ptrap]) - b) / a
+                out[self._ptrap] = ((np.sqrt(b ** 2 + 4 * a * val[self._ptrap])
+                                     - b) / a)
             out[self._prec] = val[self._prec] / self._w0_m[self._prec]
         self.thick = out
 
@@ -377,7 +370,7 @@ class FlowlineModel(object):
 
     def __init__(self, flowlines, mb_model=None, y0=0., glen_a=None,
                  fs=0., inplace=True, is_tidewater=False,
-                 mb_elev_feedback='annual'):
+                 mb_elev_feedback='annual', check_for_boundaries=True):
         """Create a new flowline model from the flowlines and a MB model.
 
         Parameters
@@ -403,6 +396,9 @@ class FlowlineModel(object):
             mass-balance should be recomputed from the mass balance model.
             'Never' is equivalent to 'annual' but without elevation feedback
             at all (the heights are taken from the first call).
+        check_for_boundaries : bool
+            whether the model should raise an error when the glacier exceeds
+            the domain boundaries.
         """
 
         self.is_tidewater = is_tidewater
@@ -432,6 +428,8 @@ class FlowlineModel(object):
             glen_a = cfg.A
         self.glen_a = glen_a
         self.fs = fs
+
+        self.check_for_boundaries = check_for_boundaries and not is_tidewater
 
         # we keep glen_a as input, but for optimisation we stick to "fd"
         self._fd = 2. / (N+2) * self.glen_a
@@ -576,9 +574,9 @@ class FlowlineModel(object):
             self.step(t-self.t)
 
         # Check for domain bounds
-        if self.fls[-1].thick[-1] > 10:
-            if not self.is_tidewater:
-                raise RuntimeError('Glacier exceeds domain boundaries.')
+        if self.check_for_boundaries:
+            if self.fls[-1].thick[-1] > 10:
+                    raise RuntimeError('Glacier exceeds domain boundaries.')
 
         # Check for NaNs
         for fl in self.fls:
@@ -1299,7 +1297,7 @@ def glacier_from_netcdf(path):
 
     # Adds the line level
     for fl in fls:
-        fl.order = oggm.core.preprocessing.centerlines._line_order(fl)
+        fl.order = line_order(fl)
 
     return fls
 
@@ -1319,108 +1317,72 @@ def init_present_time_glacier(gdir):
     def_lambda = cfg.PARAMS['trapezoid_lambdas']
     min_shape = cfg.PARAMS['mixed_min_shape']
 
-    # We take the div_0 centerlines and fill them with the inversion results
-    if gdir.is_tidewater:
-        cls = gdir.read_pickle('inversion_flowlines', div_id=1)
-    else:
-        cls = gdir.read_pickle('inversion_flowlines', div_id=0)
-    ds_bss = gdir.read_pickle('downstream_bed')
+    cls = gdir.read_pickle('inversion_flowlines')
+    invs = gdir.read_pickle('inversion_output')
 
-    icls = []
-    for div_id in gdir.divide_ids:
-        icls.extend(gdir.read_pickle('inversion_flowlines', div_id=div_id))
-
-    invs = []
-    for div_id in gdir.divide_ids:
-        invs.extend(gdir.read_pickle('inversion_output', div_id=div_id))
-
-    # This is the not so nice part. Find which cls belongs to which
+    # Fill the tributaries
     new_fls = []
     flows_to_ids = []
-    for cl, ds_bs in zip(cls, ds_bss):
-        icl = None
-        inv = None
-        for totest, tinv in zip(icls, invs):
-            if cl.head == totest.head:
-                icl = totest
-                inv = tinv
-                break
-        if not icl:
-            raise RuntimeError('({}) centerlines could not be '
-                               'matched'.format(gdir.rgi_id))
-
-        if icl.nx <= cl.nx:
-            surface_h = cl.surface_h.copy()
-            line = cl.line
-            nx = cl.nx
-            bed_shape = ds_bs
-        else:
-            # Make sure we are not far off
-            assert (icl.nx - cl.nx) < 5
-            surface_h = icl.surface_h.copy()
-            line = icl.line
-            nx = icl.nx
-            bed_shape = surface_h * np.NaN
-
-        is_gl = np.zeros(nx, dtype=np.bool)
-        is_gl[:icl.nx] = True
+    for cl, inv in zip(cls, invs):
 
         # Get the data to make the model flowlines
-        section = surface_h * 0.
-        section[is_gl] = inv['volume'] / (cl.dx * map_dx)
-        bed_h = surface_h.copy()
-        bed_h[is_gl] -= inv['thick']
+        line = cl.line
+        section = inv['volume'] / (cl.dx * map_dx)
+        surface_h = cl.surface_h
+        bed_h = surface_h - inv['thick']
+        widths_m = cl.widths * map_dx
 
-        assert np.all(icl.widths > 0)
-        bed_shape_gl = 4 * inv['thick'] / (icl.widths * map_dx)**2
-        bed_shape[is_gl] = bed_shape_gl
+        assert np.all(cl.widths > 0)
+        bed_shape = 4 * inv['thick'] / (cl.widths * map_dx) ** 2
 
-        lambdas = bed_shape * np.NaN
-        lambdas_gl = inv['thick'] * np.NaN
-        lambdas_gl[bed_shape_gl < min_shape] = def_lambda
-        lambdas_gl[inv['is_rectangular']] = 0.
+        lambdas = inv['thick'] * np.NaN
+        lambdas[bed_shape < min_shape] = def_lambda
+        lambdas[inv['is_rectangular']] = 0.
 
-        # For the very last pixs of a glacier, the section might be zero after
-        # the inversion, and the bedshapes are chaotic. We use the ones from
-        # the downstream. This is not volume conservative
-        if (not gdir.is_tidewater) and inv['is_last']:
-            lambdas_gl[-5:] = np.nan
-            bed_shape_gl[-5:] = np.nan
-            try:
-                tmp = np.append(bed_shape_gl, bed_shape[icl.nx])
-                bed_shape_gl = utils.interp_nans(tmp)[:-1].clip(min_shape)
-            except IndexError:
-                bed_shape_gl = utils.interp_nans(bed_shape_gl).clip(min_shape)
-            h = inv['thick']
-            n_sect = 2 / 3 * h * np.sqrt(4 * h / bed_shape_gl)
-            section[icl.nx-5:icl.nx] = n_sect[-5:]
-            bed_shape[icl.nx-5:icl.nx] = bed_shape_gl[-5:]
-
-        lambdas[is_gl] = lambdas_gl
-
-        is_trapezoid = np.isfinite(lambdas)
+        # Last pix of not tidewater are always parab (see below)
+        if not gdir.is_tidewater and inv['is_last']:
+            lambdas[-5:] = np.nan
 
         # Update bed_h where we now have a trapeze
-        w0_m = icl.widths * map_dx - lambdas_gl * inv['thick']
+        w0_m = cl.widths * map_dx - lambdas * inv['thick']
         b = 2 * w0_m
-        a = 2 * lambdas_gl
+        a = 2 * lambdas
         with np.errstate(divide='ignore', invalid='ignore'):
-            thick = (np.sqrt(b**2 + 4 * a * section[is_gl]) - b) / a
-        pzero = lambdas_gl == 0
-        thick[pzero] = section[is_gl][pzero] / w0_m[pzero]
-        bed_h_n = surface_h.copy()[is_gl] - thick
-        assert np.all(np.isfinite(bed_h_n[np.isfinite(lambdas_gl)]))
-        bed_h[is_gl & is_trapezoid] = bed_h_n[np.isfinite(lambdas_gl)]
+            thick = (np.sqrt(b ** 2 + 4 * a * section) - b) / a
+        ptrap = (lambdas != 0) & np.isfinite(lambdas)
+        bed_h[ptrap] = cl.surface_h[ptrap] - thick[ptrap]
 
-        # Default widths for everything goes wrong
-        widths_m = np.zeros(nx)
-        widths_m[is_gl] = icl.widths * map_dx
+        # For the very last pixs of a glacier, the section might be zero after
+        # the inversion, and the bedshapes are chaotic. We interpolate from
+        # the downstream. This is not volume conservative
+        if not gdir.is_tidewater and inv['is_last']:
+            dic_ds = gdir.read_pickle('downstream_line')
+            bed_shape[-5:] = np.nan
 
-        nfl = MixedFlowline(line=line, dx=cl.dx, map_dx=map_dx,
-                            surface_h=surface_h, bed_h=bed_h,
-                            section=section, bed_shape=bed_shape,
-                            is_trapezoid=is_trapezoid, lambdas=lambdas,
-                            widths_m=widths_m)
+            # Interpolate
+            bed_shape = utils.interp_nans(np.append(bed_shape,
+                                                    dic_ds['bedshapes'][0]))
+            bed_shape = bed_shape[:-1].clip(min_shape)
+
+            # Correct the section volume
+            h = inv['thick']
+            section[-5:] = (2 / 3 * h * np.sqrt(4 * h / bed_shape))[-5:]
+
+            # Add the downstream
+            bed_shape = np.append(bed_shape, dic_ds['bedshapes'])
+            lambdas = np.append(lambdas, dic_ds['bedshapes'] * np.NaN)
+            section = np.append(section, dic_ds['bedshapes'] * 0.)
+            surface_h = np.append(surface_h, dic_ds['surface_h'])
+            bed_h = np.append(bed_h, dic_ds['surface_h'])
+            widths_m = np.append(widths_m, dic_ds['bedshapes'] * 0.)
+            line = dic_ds['full_line']
+
+        nfl = MixedBedFlowline(line=line, dx=cl.dx, map_dx=map_dx,
+                               surface_h=surface_h, bed_h=bed_h,
+                               section=section, bed_shape=bed_shape,
+                               is_trapezoid=np.isfinite(lambdas),
+                               lambdas=lambdas,
+                               widths_m=widths_m)
 
         if cl.flows_to:
             flows_to_ids.append(cls.index(cl.flows_to))
@@ -1436,7 +1398,7 @@ def init_present_time_glacier(gdir):
 
     # Adds the line level
     for fl in new_fls:
-        fl.order = oggm.core.preprocessing.centerlines._line_order(fl)
+        fl.order = line_order(fl)
 
     # Write the data
     gdir.write_pickle(new_fls, 'model_flowlines')
@@ -1574,7 +1536,7 @@ def iterative_initial_glacier_search(gdir, y0=None, init_bias=0., rtol=0.005,
     if y0 is None:
         y0 = cfg.PARAMS['y0']
     y1 = gdir.rgi_date.year
-    mb = mbmods.PastMassBalanceModel(gdir)
+    mb = mbmods.PastMassBalance(gdir)
     fls = gdir.read_pickle('model_flowlines')
 
     model = FluxBasedModel(fls, mb_model=mb, y0=0., fs=fs, glen_a=glen_a)
@@ -1587,12 +1549,10 @@ def iterative_initial_glacier_search(gdir, y0=None, init_bias=0., rtol=0.005,
                                                  init_bias=init_bias,
                                                  ref_area=ref_area)
 
-    # Some parameters for posterity:
+    # Some parameters for posterity (we used to store this):
     params = OrderedDict(rtol=rtol, init_bias=init_bias, ref_area=ref_area,
                          ite=ite, mb_bias=bias)
 
-    # Write the data
-    gdir.write_pickle(params, 'find_initial_glacier_params')
     path = gdir.get_filepath('model_run', delete=True)
     if write_steps:
         _ = past_model.run_until_and_store(y1, path=path)
@@ -1601,7 +1561,7 @@ def iterative_initial_glacier_search(gdir, y0=None, init_bias=0., rtol=0.005,
 
 
 def _run_with_numerical_tests(gdir, filesuffix, mb, ys, ye, kwargs,
-                              zero_initial_glacier=False):
+                              zero_initial_glacier=False, model_fls=None):
     """Quick n dirty function to avoid copy-paste smell"""
 
     run_path = gdir.get_filepath('model_run', filesuffix=filesuffix,
@@ -1612,11 +1572,13 @@ def _run_with_numerical_tests(gdir, filesuffix, mb, ys, ye, kwargs,
     steps = ['default', 'conservative', 'ultra-conservative']
     for step in steps:
         log.info('(%s) trying %s time stepping scheme.', gdir.rgi_id, step)
-        fls = gdir.read_pickle('model_flowlines')
+        if model_fls is None:
+            model_fls = gdir.read_pickle('model_flowlines')
         if zero_initial_glacier:
-            for fl in fls:
-                fl.thick = fl.thick * 0.,
-        model = FluxBasedModel(fls, mb_model=mb, y0=ys, time_stepping=step,
+            for fl in model_fls:
+                fl.thick = fl.thick * 0.
+        model = FluxBasedModel(model_fls, mb_model=mb, y0=ys,
+                               time_stepping=step,
                                is_tidewater=gdir.is_tidewater,
                                **kwargs)
         try:
@@ -1633,8 +1595,9 @@ def _run_with_numerical_tests(gdir, filesuffix, mb, ys, ye, kwargs,
 
 
 @entity_task(log)
-def random_glacier_evolution(gdir, nyears=1000, y0=None, bias=None,
-                             seed=None, temperature_bias=None, filesuffix='',
+def random_glacier_evolution(gdir, nyears=1000, y0=None, halfsize=15,
+                             bias=None, seed=None, temperature_bias=None,
+                             filesuffix='', init_model_fls=None,
                              zero_initial_glacier=False,
                              **kwargs):
     """Random glacier dynamics for benchmarking purposes.
@@ -1645,9 +1608,11 @@ def random_glacier_evolution(gdir, nyears=1000, y0=None, bias=None,
      ----------
      nyears : int
          length of the simulation
-     y0 : int
+     y0 : int, optional
          central year of the random climate period. The default is to be
          centred on t*.
+     halfsize : int, optional
+         the half-size of the time window (window size = 2 * halfsize + 1)
      bias : float
          bias of the mb model. Default is to use the calibrated one, which
          is often a better idea. For t* experiments it can be useful to set it
@@ -1661,6 +1626,9 @@ def random_glacier_evolution(gdir, nyears=1000, y0=None, bias=None,
      filesuffix : str
          this add a suffix to the output file (useful to avoid overwriting
          previous experiments)
+     init_model_fls : []
+         list of flowlines to use to initialise the model (the default is the
+         present_time_glacier file from the glacier directory)
      zero_initial_glacier : bool
          if true, the ice thickness is set to zero before the simulation
      kwargs : dict
@@ -1680,16 +1648,20 @@ def random_glacier_evolution(gdir, nyears=1000, y0=None, bias=None,
 
     ys = 0
     ye = ys + nyears
-    mb = mbmods.RandomMassBalanceModel(gdir, y0=y0, bias=bias, seed=seed)
+    mb = mbmods.RandomMassBalance(gdir, y0=y0, halfsize=halfsize,
+                                  bias=bias, seed=seed)
     if temperature_bias is not None:
         mb.temp_bias = temperature_bias
 
     return _run_with_numerical_tests(gdir, filesuffix, mb, ys, ye, kwargs,
+                                     model_fls=init_model_fls,
                                      zero_initial_glacier=zero_initial_glacier)
+
 
 @entity_task(log)
 def run_constant_climate(gdir, nyears=1000, y0=None, bias=None,
                          temperature_bias=None, filesuffix='',
+                         init_model_fls=None,
                          zero_initial_glacier=False,
                          **kwargs):
     """Run a glacier under a constant climate for a given climate period.
@@ -1713,6 +1685,9 @@ def run_constant_climate(gdir, nyears=1000, y0=None, bias=None,
          previous experiments)
      zero_initial_glacier : bool
          if true, the ice thickness is set to zero before the simulation
+     init_model_fls : []
+         list of flowlines to use to initialise the model (the default is the
+         present_time_glacier file from the glacier directory)
      kwargs : dict
          kwargs to pass to the FluxBasedModel instance
      """
@@ -1728,17 +1703,19 @@ def run_constant_climate(gdir, nyears=1000, y0=None, bias=None,
     kwargs.setdefault('fs', fs)
     kwargs.setdefault('glen_a', glen_a)
 
-    mb = mbmods.ConstantMassBalanceModel(gdir, y0=y0, bias=bias)
+    mb = mbmods.ConstantMassBalance(gdir, y0=y0, bias=bias)
     if temperature_bias is not None:
         mb.temp_bias = temperature_bias
 
     return _run_with_numerical_tests(gdir, filesuffix, mb, 0, nyears, kwargs,
+                                     model_fls=init_model_fls,
                                      zero_initial_glacier=zero_initial_glacier)
 
 
 @entity_task(log)
 def run_from_climate_data(gdir, ys=None, ye=None, filename='climate_monthly',
-                          input_filesuffix='', filesuffix='', **kwargs):
+                          input_filesuffix='', filesuffix='',
+                          init_model_fls=None, **kwargs):
     """ Runs glacier with climate input from a general circulation model.
 
      Parameters
@@ -1754,6 +1731,9 @@ def run_from_climate_data(gdir, ys=None, ye=None, filename='climate_monthly',
          filesuffix for the input climate file
      filesuffix : str
          for the output file
+     init_model_fls : []
+         list of flowlines to use to initialise the model (the default is the
+         present_time_glacier file from the glacier directory)
      kwargs : dict
          kwargs to pass to the FluxBasedModel instance
      """
@@ -1774,6 +1754,7 @@ def run_from_climate_data(gdir, ys=None, ye=None, filename='climate_monthly',
     if ye is None:
         ye = cfg.PARAMS['ye']
 
-    mb = mbmods.PastMassBalanceModel(gdir, filename=filename,
-                                     input_filesuffix=input_filesuffix)
-    return _run_with_numerical_tests(gdir, filesuffix, mb, ys, ye, kwargs)
+    mb = mbmods.PastMassBalance(gdir, filename=filename,
+                                input_filesuffix=input_filesuffix)
+    return _run_with_numerical_tests(gdir, filesuffix, mb, ys, ye, kwargs,
+                                     model_fls=init_model_fls)

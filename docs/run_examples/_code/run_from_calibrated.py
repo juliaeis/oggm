@@ -39,10 +39,7 @@ cfg.PARAMS['border'] = 100
 # Set to True for operational runs
 cfg.PARAMS['continue_on_error'] = False
 
-# Don't use divides for now
-cfg.set_divides_db()
-
-# But we use intersects
+# We use intersects
 # (this is slow, it could be replaced with a subset of the global file)
 rgi_dir = utils.get_rgi_intersects_dir()
 cfg.set_intersects_db(path.join(rgi_dir, '00_rgi50_AllRegs',
@@ -88,8 +85,8 @@ gdirs = workflow.init_glacier_regions(rgidf)
 task_list = [
     tasks.glacier_masks,
     tasks.compute_centerlines,
-    tasks.compute_downstream_lines,
     tasks.initialize_flowlines,
+    tasks.compute_downstream_line,
     tasks.compute_downstream_bedshape,
     tasks.catchment_area,
     tasks.catchment_intersections,
@@ -102,12 +99,12 @@ for task in task_list:
 # Climate tasks -- only data IO and tstar interpolation!
 execute_entity_task(tasks.process_cru_data, gdirs)
 tasks.distribute_t_stars(gdirs)
+execute_entity_task(tasks.apparent_mb, gdirs)
 
 # Inversion tasks
 execute_entity_task(tasks.prepare_for_inversion, gdirs)
 # We use the default parameters for this run
-execute_entity_task(tasks.volume_inversion, gdirs,
-                    use_cfg_params={'glen_a': cfg.A, 'fs': 0})
+execute_entity_task(tasks.volume_inversion, gdirs, glen_a=cfg.A, fs=0)
 execute_entity_task(tasks.filter_inversion_output, gdirs)
 
 # Final preparation for the run

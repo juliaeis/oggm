@@ -1,4 +1,3 @@
-from __future__ import division
 import warnings
 warnings.filterwarnings("once", category=DeprecationWarning)
 import unittest
@@ -10,6 +9,7 @@ import gzip
 import salem
 import numpy as np
 import pandas as pd
+import geopandas as gpd
 from numpy.testing import assert_array_equal, assert_allclose
 
 import oggm
@@ -18,12 +18,9 @@ from oggm import cfg
 from oggm.tests import is_download
 from oggm.tests.funcs import get_test_dir
 
-# Globals
-TEST_DIR = os.path.join(get_test_dir(), 'tmp_download')
-utils.mkdir(TEST_DIR)
-
 # In case some logging happens or so
 cfg.PATHS['working_dir'] = get_test_dir()
+
 
 class TestFuncs(unittest.TestCase):
 
@@ -153,13 +150,36 @@ class TestInitialize(unittest.TestCase):
         self.homedir = os.path.expanduser('~')
 
     def test_defaults(self):
-        expected = os.path.join(self.homedir, 'OGGM_WORKING_DIRECTORY')
-        self.assertEqual(cfg.PATHS['working_dir'], expected)
+        self.assertFalse(cfg.PATHS['working_dir'])
 
     def test_pathsetter(self):
         cfg.PATHS['working_dir'] = os.path.join('~', 'my_OGGM_wd')
         expected = os.path.join(self.homedir, 'my_OGGM_wd')
         self.assertEqual(cfg.PATHS['working_dir'], expected)
+
+class TestGlacierDirectory(unittest.TestCase):
+
+    def setUp(self):
+        cfg.initialize()
+        self.testdir = os.path.join(get_test_dir(), 'tmp_gir')
+        self.reset_dir()
+
+    def tearDown(self):
+        if os.path.exists(self.testdir):
+            shutil.rmtree(self.testdir)
+
+    def reset_dir(self):
+        utils.mkdir(self.testdir, reset=True)
+
+    def test_leclercq(self):
+
+        hef_file = utils.get_demo_file('Hintereisferner_RGI5.shp')
+        entity = gpd.read_file(hef_file).iloc[0]
+        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
+
+        df = gdir.get_ref_length_data()
+        assert df.name == 'Hintereis'
+        assert len(df) == 105
 
 
 def touch(path):
@@ -197,23 +217,25 @@ class FakeDownloadManager():
 class TestFakeDownloads(unittest.TestCase):
 
     def setUp(self):
+        self.dldir = os.path.join(get_test_dir(), 'tmp_download')
+        utils.mkdir(self.dldir)
         cfg.initialize()
-        cfg.PATHS['dl_cache_dir'] = os.path.join(TEST_DIR, 'dl_cache')
-        cfg.PATHS['working_dir'] = os.path.join(TEST_DIR, 'wd')
-        cfg.PATHS['tmp_dir'] = os.path.join(TEST_DIR, 'extract')
-        cfg.PATHS['rgi_dir'] = os.path.join(TEST_DIR, 'rgi_test')
-        cfg.PATHS['cru_dir'] = os.path.join(TEST_DIR, 'cru_test')
-        cfg.CACHE_DIR = os.path.join(TEST_DIR, 'cache_dir')
+        cfg.PATHS['dl_cache_dir'] = os.path.join(self.dldir, 'dl_cache')
+        cfg.PATHS['working_dir'] = os.path.join(self.dldir, 'wd')
+        cfg.PATHS['tmp_dir'] = os.path.join(self.dldir, 'extract')
+        cfg.PATHS['rgi_dir'] = os.path.join(self.dldir, 'rgi_test')
+        cfg.PATHS['cru_dir'] = os.path.join(self.dldir, 'cru_test')
+        cfg.CACHE_DIR = os.path.join(self.dldir, 'cache_dir')
         self.reset_dir()
 
     def tearDown(self):
-        if os.path.exists(TEST_DIR):
-            shutil.rmtree(TEST_DIR)
+        if os.path.exists(self.dldir):
+            shutil.rmtree(self.dldir)
 
     def reset_dir(self):
-        if os.path.exists(TEST_DIR):
-            shutil.rmtree(TEST_DIR)
-        utils.mkdir(TEST_DIR)
+        if os.path.exists(self.dldir):
+            shutil.rmtree(self.dldir)
+        utils.mkdir(self.dldir)
         utils.mkdir(cfg.PATHS['dl_cache_dir'])
         utils.mkdir(cfg.PATHS['working_dir'])
         utils.mkdir(cfg.PATHS['tmp_dir'])
@@ -238,7 +260,7 @@ class TestFakeDownloads(unittest.TestCase):
     def test_rgi(self):
 
         # Make a fake RGI file
-        rgi_dir = os.path.join(TEST_DIR, 'rgi50')
+        rgi_dir = os.path.join(self.dldir, 'rgi50')
         utils.mkdir(rgi_dir)
         make_fake_zipdir(os.path.join(rgi_dir, '01_rgi50_Region'),
                          fakefile='test.txt')
@@ -259,7 +281,7 @@ class TestFakeDownloads(unittest.TestCase):
     def test_rgi_intersects(self):
 
         # Make a fake RGI file
-        rgi_dir = os.path.join(TEST_DIR, 'rgi50')
+        rgi_dir = os.path.join(self.dldir, 'rgi50')
         utils.mkdir(rgi_dir)
         make_fake_zipdir(os.path.join(rgi_dir, 'RGI_V5_Intersects'),
                          fakefile='Intersects_OGGM_Manifest.txt')
@@ -281,7 +303,7 @@ class TestFakeDownloads(unittest.TestCase):
     def test_rgi_corrected(self):
 
         # Make a fake RGI file
-        rgi_dir = os.path.join(TEST_DIR, 'rgi50')
+        rgi_dir = os.path.join(self.dldir, 'rgi50')
         utils.mkdir(rgi_dir)
         make_fake_zipdir(os.path.join(rgi_dir, 'RGIV5_Corrected'),
                          fakefile='RGIV5_Corrected_OGGM_Manifest.txt')
@@ -302,7 +324,7 @@ class TestFakeDownloads(unittest.TestCase):
     def test_cru(self):
 
         # Create fake cru file
-        cf = os.path.join(TEST_DIR, 'cru_ts3.24.01.1901.2015.tmp.dat.nc.gz')
+        cf = os.path.join(self.dldir, 'cru_ts3.24.01.1901.2015.tmp.dat.nc.gz')
         with gzip.open(cf, 'wb') as gz:
             gz.write(b'dummy')
 
@@ -321,7 +343,7 @@ class TestFakeDownloads(unittest.TestCase):
     def test_srtm(self):
 
         # Make a fake topo file
-        tf = make_fake_zipdir(os.path.join(TEST_DIR, 'srtm_39_03'),
+        tf = make_fake_zipdir(os.path.join(self.dldir, 'srtm_39_03'),
                               fakefile='srtm_39_03.tif')
 
         def down_check(url, cache_name=None, reset=False):
@@ -382,7 +404,7 @@ class TestFakeDownloads(unittest.TestCase):
     def test_aster(self):
 
         # Make a fake topo file
-        tf = make_fake_zipdir(os.path.join(TEST_DIR, 'ASTGTM2_S88W121'),
+        tf = make_fake_zipdir(os.path.join(self.dldir, 'ASTGTM2_S88W121'),
                               fakefile='ASTGTM2_S88W121_dem.tif')
 
         def down_check(url):
@@ -401,19 +423,21 @@ class TestFakeDownloads(unittest.TestCase):
 class TestDataFiles(unittest.TestCase):
 
     def setUp(self):
+        self.dldir = os.path.join(get_test_dir(), 'tmp_download')
+        utils.mkdir(self.dldir)
         cfg.initialize()
-        cfg.PATHS['dl_cache_dir'] = os.path.join(TEST_DIR, 'dl_cache')
-        cfg.PATHS['working_dir'] = os.path.join(TEST_DIR, 'wd')
-        cfg.PATHS['tmp_dir'] = os.path.join(TEST_DIR, 'extract')
+        cfg.PATHS['dl_cache_dir'] = os.path.join(self.dldir, 'dl_cache')
+        cfg.PATHS['working_dir'] = os.path.join(self.dldir, 'wd')
+        cfg.PATHS['tmp_dir'] = os.path.join(self.dldir, 'extract')
         self.reset_dir()
 
     def tearDown(self):
-        if os.path.exists(TEST_DIR):
-            shutil.rmtree(TEST_DIR)
+        if os.path.exists(self.dldir):
+            shutil.rmtree(self.dldir)
 
     def reset_dir(self):
-        if os.path.exists(TEST_DIR):
-            shutil.rmtree(TEST_DIR)
+        if os.path.exists(self.dldir):
+            shutil.rmtree(self.dldir)
         utils.mkdir(cfg.PATHS['dl_cache_dir'])
         utils.mkdir(cfg.PATHS['working_dir'])
         utils.mkdir(cfg.PATHS['tmp_dir'])
@@ -528,9 +552,9 @@ class TestDataFiles(unittest.TestCase):
 
     def test_lrufilecache(self):
 
-        f1 = os.path.join(TEST_DIR, 'f1.txt')
-        f2 = os.path.join(TEST_DIR, 'f2.txt')
-        f3 = os.path.join(TEST_DIR, 'f3.txt')
+        f1 = os.path.join(self.dldir, 'f1.txt')
+        f2 = os.path.join(self.dldir, 'f2.txt')
+        f3 = os.path.join(self.dldir, 'f3.txt')
         open(f1, 'a').close()
         open(f2, 'a').close()
         open(f3, 'a').close()
@@ -560,21 +584,21 @@ class TestDataFiles(unittest.TestCase):
     def test_lruhandler(self):
 
         self.reset_dir()
-        f1 = os.path.join(TEST_DIR, 'f1.txt')
-        f2 = os.path.join(TEST_DIR, 'f2.txt')
-        f3 = os.path.join(TEST_DIR, 'f3.txt')
+        f1 = os.path.join(self.dldir, 'f1.txt')
+        f2 = os.path.join(self.dldir, 'f2.txt')
+        f3 = os.path.join(self.dldir, 'f3.txt')
         open(f1, 'a').close()
         time.sleep(0.1)
         open(f2, 'a').close()
         time.sleep(0.1)
         open(f3, 'a').close()
 
-        l = cfg.get_lru_handler(TEST_DIR, maxsize=3, ending='.txt')
+        l = cfg.get_lru_handler(self.dldir, maxsize=3, ending='.txt')
         assert os.path.exists(f1)
         assert os.path.exists(f2)
         assert os.path.exists(f3)
 
-        l = cfg.get_lru_handler(TEST_DIR, maxsize=2, ending='.txt')
+        l = cfg.get_lru_handler(self.dldir, maxsize=2, ending='.txt')
         assert not os.path.exists(f1)
         assert os.path.exists(f2)
         assert os.path.exists(f3)
@@ -635,7 +659,7 @@ class TestDataFiles(unittest.TestCase):
     def test_download_cru(self):
 
         tmp = cfg.PATHS['cru_dir']
-        cfg.PATHS['cru_dir'] = os.path.join(TEST_DIR, 'cru_extract')
+        cfg.PATHS['cru_dir'] = os.path.join(self.dldir, 'cru_extract')
 
         of = utils.get_cru_file('tmp')
         self.assertTrue(os.path.exists(of))
@@ -646,7 +670,7 @@ class TestDataFiles(unittest.TestCase):
     def test_download_rgi(self):
 
         tmp = cfg.PATHS['rgi_dir']
-        cfg.PATHS['rgi_dir'] = os.path.join(TEST_DIR, 'rgi_extract')
+        cfg.PATHS['rgi_dir'] = os.path.join(self.dldir, 'rgi_extract')
 
         of = utils.get_rgi_dir()
         of = os.path.join(of, '01_rgi50_Alaska', '01_rgi50_Alaska.shp')
@@ -658,7 +682,7 @@ class TestDataFiles(unittest.TestCase):
     def test_download_rgi_intersects(self):
 
         tmp = cfg.PATHS['rgi_dir']
-        cfg.PATHS['rgi_dir'] = os.path.join(TEST_DIR, 'rgi_extract')
+        cfg.PATHS['rgi_dir'] = os.path.join(self.dldir, 'rgi_extract')
 
         of = utils.get_rgi_intersects_dir()
         of = os.path.join(of, '01_rgi50_Alaska',
@@ -671,7 +695,7 @@ class TestDataFiles(unittest.TestCase):
     def test_download_rgi_corrected(self):
 
         tmp = cfg.PATHS['rgi_dir']
-        cfg.PATHS['rgi_dir'] = os.path.join(TEST_DIR, 'rgi_extract')
+        cfg.PATHS['rgi_dir'] = os.path.join(self.dldir, 'rgi_extract')
 
         of = utils.get_rgi_corrected_dir()
         of = os.path.join(of, '01_rgi50_Alaska', '01_rgi50_Alaska.shp')
