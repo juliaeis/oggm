@@ -49,40 +49,6 @@ LABEL_STRUCT = np.array([[0, 1, 0],
                          [0, 1, 0]])
 
 
-def _line_extend(uline, dline, dx):
-    """An extension of line_interpol with a downstream line to add
-
-    Parameters
-    ----------
-    uline: a shapely.geometry.LineString instance
-    dline: a shapely.geometry.LineString instance
-    dx: the spacing
-
-    Returns
-    -------
-    a shapely.geometry.LineString
-    """
-
-    # First points is easy
-    points = [shpg.Point(c) for c in uline.coords]
-
-    # Continue as long as line is not finished
-    while True:
-        pref = points[-1]
-        pbs = pref.buffer(dx).boundary.intersection(dline)
-        if pbs.type == 'Point':
-            pbs = [pbs]
-        # Out of the point(s) that we get, take the one farthest from the top
-        refdis = dline.project(pref)
-        tdis = np.array([dline.project(pb) for pb in pbs])
-        p = np.where(tdis > refdis)[0]
-        if len(p) == 0:
-            break
-        points.append(pbs[int(p[0])])
-
-    return shpg.LineString(points)
-
-
 def _mask_to_polygon(mask, x=None, y=None, gdir=None):
     """Converts a mask to a single polygon.
 
@@ -114,7 +80,7 @@ def _mask_to_polygon(mask, x=None, y=None, gdir=None):
 
     regions, nregions = label(mask, structure=LABEL_STRUCT)
     if nregions > 1:
-        log.debug('%s: we had to cut a blob from the catchment', gdir.rgi_id)
+        log.debug('(%s) we had to cut a blob from the catchment', gdir.rgi_id)
         # Check the size of those
         region_sizes = [np.sum(regions == r) for r in np.arange(1, nregions+1)]
         am = np.argmax(region_sizes)
@@ -122,7 +88,7 @@ def _mask_to_polygon(mask, x=None, y=None, gdir=None):
         sr = region_sizes.pop(am)
         for ss in region_sizes:
             if (ss / sr) > 0.2:
-                log.warning('%s: this blob was unusually large', gdir.rgi_id)
+                log.warning('(%s) this blob was unusually large', gdir.rgi_id)
         mask[:] = 0
         mask[np.where(regions == (am+1))] = 1
 
@@ -550,7 +516,7 @@ def initialize_flowlines(gdir, div_id=None):
             assert np.any(isfin)
             perc_bad = np.sum(~isfin) / len(isfin)
             if perc_bad > 0.8:
-                log.warning('{}: more than {:.0%} of the flowline is cropped '
+                log.warning('({}) more than {:.0%} of the flowline is cropped '
                             'due to negative slopes.'.format(gdir.rgi_id,
                                                              perc_bad))
 
@@ -570,6 +536,7 @@ def initialize_flowlines(gdir, div_id=None):
 
     # All objects are initialized, now we can link them.
     for cl, fl in zip(cls, fls):
+        fl.orig_centerline_id = id(cl)
         if cl.flows_to is None:
             continue
         fl.set_flows_to(fls[cls.index(cl.flows_to)])
@@ -655,16 +622,16 @@ def catchment_width_geom(gdir, div_id=None):
 
         valid = np.where(np.isfinite(widths))
         if len(valid[0]) == 0:
-            errmsg = '{}: first guess widths went wrong.'.format(gdir.rgi_id)
+            errmsg = '({}) first guess widths went wrong.'.format(gdir.rgi_id)
             raise RuntimeError(errmsg)
 
         # Ok now the entire centerline is computed.
         # I take all these widths for geometrically valid, and see if they
         # intersect with our buffered catchment/glacier intersections
-        touches_border = []
+        is_rectangular = []
         for wg in wlines:
-            touches_border.append(np.any(gdfi.intersects(wg)))
-        touches_border = _filter_grouplen(touches_border, minsize=5)
+            is_rectangular.append(np.any(gdfi.intersects(wg)))
+        is_rectangular = _filter_grouplen(is_rectangular, minsize=5)
 
         # we filter the lines which have a large altitude range
         fil_widths = _filter_for_altitude_range(widths, wlines, topo)
@@ -679,20 +646,18 @@ def catchment_width_geom(gdir, div_id=None):
         if len(valid[0]) == 0:
             # This happens very rarely. Just pick the middle and
             # the correction task should do the rest
-            log.warning('{}: width filtering too strong.'.format(gdir.rgi_id))
+            log.warning('({}) width filtering too strong.'.format(gdir.rgi_id))
             fil_widths = widths[np.int(len(widths) / 2.)]
 
-        # "Touches border" is a badly chosen name. In fact, it should be
-        # called "is_rectangular" since tidewater glaciers have a special
-        # treatment here
+        # Special treatment for tidewater glaciers
         if gdir.is_tidewater and fl.flows_to is None:
-            touches_border[-5:] = True
+            is_rectangular[-5:] = True
 
         # Write it in the objects attributes
         assert len(fil_widths) == n
         fl.widths = fil_widths
         fl.geometrical_widths = wlines
-        fl.touches_border = touches_border
+        fl.is_rectangular = is_rectangular
 
     # Overwrite pickle
     gdir.write_pickle(flowlines, 'inversion_flowlines', div_id=div_id)
@@ -722,7 +687,7 @@ def catchment_width_correction(gdir, div_id=None):
         area = 0.
         divides = []
         for i in gdir.divide_ids:
-            log.info('%s: width correction, divide %d', gdir.rgi_id, i)
+            log.info('(%s) width correction, divide %d', gdir.rgi_id, i)
             fls = catchment_width_correction(gdir, div_id=i, reset=True)
             for fl in fls:
                 area += np.sum(fl.widths) * fl.dx
@@ -731,7 +696,7 @@ def catchment_width_correction(gdir, div_id=None):
         # Final correction - because of the raster, the gridded area of the
         # glacier is not that of the actual geometry. correct for that
         fac = gdir.rgi_area_km2 / (area * gdir.grid.dx**2 * 10**-6)
-        log.debug('%s: corrected widths with a factor %.2f', gdir.rgi_id, fac)
+        log.debug('(%s) corrected widths with a factor %.2f', gdir.rgi_id, fac)
         for i in gdir.divide_ids:
             fls = divides[i-1]
             for fl in fls:
@@ -825,15 +790,15 @@ def catchment_width_correction(gdir, div_id=None):
             if bsize > 500:
                 nmin -= 1
                 bsize = cfg.PARAMS['base_binsize']
-                log.warning('%s: reduced min n per bin to %d', gdir.rgi_id,
+                log.warning('(%s) reduced min n per bin to %d', gdir.rgi_id,
                             nmin)
                 if nmin == 0:
-                    raise RuntimeError('NO binsize could be chosen for: '
-                                       '{}'.format(gdir.rgi_id))
+                    raise RuntimeError('({}) no binsize could be chosen '
+                                       .format(gdir.rgi_id))
         if bsize > 150:
-            log.warning('%s: chosen binsize %d', gdir.rgi_id, bsize)
+            log.warning('(%s) chosen binsize %d', gdir.rgi_id, bsize)
         else:
-            log.debug('%s: chosen binsize %d', gdir.rgi_id, bsize)
+            log.debug('(%s) chosen binsize %d', gdir.rgi_id, bsize)
 
         # Now keep the good topo pixels and send the unattributed ones to the
         # next flowline

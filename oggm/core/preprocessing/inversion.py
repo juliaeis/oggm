@@ -35,7 +35,6 @@ import numpy as np
 import pandas as pd
 import netCDF4
 from scipy import optimize as optimization
-from scipy.ndimage.filters import gaussian_filter1d
 from scipy.ndimage.morphology import distance_transform_edt
 from scipy.interpolate import griddata
 # Locals
@@ -90,22 +89,22 @@ def prepare_for_inversion(gdir, div_id=None, add_debug_var=False,
 
         # Clip flux to 0
         if np.any(flux < -0.1):
-            log.warning('%s: has negative flux somewhere', gdir.rgi_id)
+            log.warning('(%s) has negative flux somewhere', gdir.rgi_id)
         flux = flux.clip(0)
 
         if fl.flows_to is None and gdir.inversion_calving_rate == 0:
             if not np.allclose(flux[-1], 0., atol=0.1):
-                msg = '{}: flux at terminus should be zero, but is: ' \
+                msg = '({}) flux at terminus should be zero, but is: ' \
                       '%.4f km3 ice yr-1'.format(gdir.rgi_id, flux[-1])
                 raise RuntimeError(msg)
             flux[-1] = 0.
 
         # Optimisation: we need to compute this term of a0 only once
-        flux_a0 = np.where(fl.touches_border, 1, 1.5)
+        flux_a0 = np.where(fl.is_rectangular, 1, 1.5)
         flux_a0 *= flux / widths
 
         # Shape
-        is_rectangular = fl.touches_border
+        is_rectangular = fl.is_rectangular
         if not invert_with_rectangular:
             is_rectangular[:] = False
         if invert_all_rectangular:
@@ -185,7 +184,7 @@ def mass_conservation_inversion(gdir, glen_a=cfg.A, fs=0., write=True):
             a0s = - cl['flux_a0'] / ((cfg.RHO*cfg.G*slope)**3*fd)
 
             if np.any(~np.isfinite(a0s)):
-                raise RuntimeError('{}: something went wrong with the '
+                raise RuntimeError('({}) something went wrong with the '
                                    'inversion'.format(gdir.rgi_id))
 
             # GO
