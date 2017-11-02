@@ -8,8 +8,8 @@ Mass-balance
 The mass-balance (MB) model implemented in OGGM is an extended version of the
 temperature index model presented by `Marzeion et al., (2012)`_.
 While the equation governing the mass-balance is that of a traditional
-temperature index model, our approach to calibration requires that we spend
-some time describing it.
+temperature index model, our special approach to calibration requires
+that we spend some time describing it.
 
 .. _Marzeion et al., (2012): http://www.the-cryosphere.net/6/1295/2012/tc-6-1295-2012.html
 
@@ -179,14 +179,14 @@ value to be interpolated to glaciers where no observations are available**.
 The benefit of this approach is best shown with the results of a cross-validation
 study realized by `Marzeion et al., (2012)`_ (and confirmed by OGGM):
 
-.. figure:: _static/marzeion_mus.png
+.. figure:: _static/mb_crossval.png
     :width: 100%
 
-    Benefit of spatially interpolating :math:`t^*` instead of :math:`\mu^*`;
-    (a) error distribution of :math:`\mu^*` if determined as the mean of
-    :math:`\mu^*` of all other glaciers with mass balance measurements in the
-    respective region; (b) error distribution of :math:`\mu^*` if determined
-    by interpolation of :math:`t^*`. Source: `Marzeion et al., (2012)`_.
+    Benefit of spatially interpolating :math:`t^{*}` instead of :math:`\mu ^{*}` as shown
+    by leave-one-glacier-out cross-validation (N = 255). **Left**: error
+    distribution of the computed mass-balance if determined by the
+    interpolated :math:`t^{*}`. **Right**: error distribution of the mass-balance
+    if determined by interpolation of :math:`\mu ^{*}`.
 
 This substantial improvement in model performance is due to several factors:
 
@@ -238,7 +238,7 @@ Here are some more details:
 - the mass-balance in OGGM is computed from the altitudes and widths
   of the flowlines grid points (see :ref:`flowlines`). The easiest way to let
   OGGM compute the mass-balance for you is to use the
-  :py:class:`core.models.massbalance.PastMassBalanceModel`.
+  :py:class:`core.massbalance.PastMassBalance`.
 - the interpolation of :math:`t^*` is done with an inverse distance weighting
   algorithm (see :py:func:`tasks.distribute_t_stars`)
 - if more than one :math:`t^*` is found for some reference glaciers, than the

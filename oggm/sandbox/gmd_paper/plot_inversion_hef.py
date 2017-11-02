@@ -1,31 +1,31 @@
 import os
+
 import geopandas as gpd
-import numpy as np
-import oggm
-from oggm import cfg, tasks, graphics
-from oggm.utils import get_demo_file
 import matplotlib.pyplot as plt
-import scipy.optimize as optimization
+import numpy as np
+
+import oggm
+from oggm import cfg, tasks
+from oggm.core.climate import (t_star_from_refmb, local_mustar, apparent_mb)
+from oggm.core.inversion import (mass_conservation_inversion)
 from oggm.sandbox.gmd_paper import PLOT_DIR
-from oggm.core.preprocessing.climate import (t_star_from_refmb,
-                                             local_mustar_apparent_mb)
-from oggm.core.preprocessing.inversion import (mass_conservation_inversion)
-from oggm.core.models.flowline import (FluxBasedModel)
-from oggm.core.models.massbalance import (RandomMassBalanceModel)
+from oggm.utils import get_demo_file, mkdir
 
 cfg.initialize()
 cfg.PATHS['dem_file'] = get_demo_file('hef_srtm.tif')
 cfg.PARAMS['border'] = 25
 cfg.PARAMS['auto_skip_task'] = True
+reset = False
 
 base_dir = os.path.join(os.path.expanduser('~/tmp'), 'OGGM_GMD', 'Invert_hef')
+mkdir(base_dir, reset=reset)
+
 entity = gpd.read_file(get_demo_file('Hintereisferner_RGI5.shp')).iloc[0]
 gdir = oggm.GlacierDirectory(entity, base_dir=base_dir)
 
 tasks.define_glacier_region(gdir, entity=entity)
 tasks.glacier_masks(gdir)
 tasks.compute_centerlines(gdir)
-tasks.compute_downstream_lines(gdir)
 tasks.initialize_flowlines(gdir)
 tasks.catchment_area(gdir)
 tasks.catchment_intersections(gdir)
@@ -34,9 +34,10 @@ tasks.catchment_width_correction(gdir)
 tasks.process_cru_data(gdir)
 tasks.mu_candidates(gdir, reset=True)
 res = t_star_from_refmb(gdir, gdir.get_ref_mb_data()['ANNUAL_BALANCE'])
-local_mustar_apparent_mb(gdir, tstar=res['t_star'][-1],
-                         bias=res['bias'][-1],
-                         prcp_fac=res['prcp_fac'], reset=True)
+local_mustar(gdir, tstar=res['t_star'][-1], bias=res['bias'][-1],
+             prcp_fac=res['prcp_fac'], reset=True)
+apparent_mb(gdir, reset=True)
+
 tasks.prepare_for_inversion(gdir, reset=True)
 
 
@@ -85,9 +86,9 @@ for i, f in enumerate(facs):
     cfg.PARAMS['prcp_scaling_factor'] = f
     tasks.mu_candidates(gdir, reset=True)
     res = t_star_from_refmb(gdir, gdir.get_ref_mb_data()['ANNUAL_BALANCE'])
-    local_mustar_apparent_mb(gdir, tstar=res['t_star'][-1],
-                             bias=res['bias'][-1],
-                             prcp_fac=res['prcp_fac'], reset=True)
+    local_mustar(gdir, tstar=res['t_star'][-1], bias=res['bias'][-1],
+                 prcp_fac=res['prcp_fac'], reset=True)
+    apparent_mb(gdir, reset=True)
     tasks.prepare_for_inversion(gdir, reset=True)
 
     v, _ = mass_conservation_inversion(gdir, glen_a=cfg.A)

@@ -1,16 +1,17 @@
 """This script reads all the RGI files and computes intersects out of them."""
 import os
-import oggm
-import pandas as pd
-import numpy as np
-import geopandas as gpd
-from glob import glob
-from shapely.ops import linemerge
-import shapely.geometry as shpg
-from oggm.utils import haversine, mkdir, get_wgms_files
-from oggm.core.preprocessing.gis import _check_geometry
-from salem import wgs84
 import time
+from glob import glob
+
+import geopandas as gpd
+import numpy as np
+import pandas as pd
+import shapely.geometry as shpg
+from salem import wgs84
+from shapely.ops import linemerge
+
+from oggm.core.gis import _check_geometry
+from oggm.utils import haversine, mkdir, get_wgms_files
 
 INDIR_DIVIDES = '/home/mowglie/disk/Data/OGGM_DATA/results_global_partitioning/altitude_filter/'
 
@@ -115,9 +116,7 @@ def prepare_divides(rgi_f):
     print('Start RGI reg ' + rgi_reg + ' ...')
     start_time = time.time()
 
-    flink, _ = get_wgms_files()
-    wgms = pd.read_csv(flink)
-
+    wgms, _ = get_wgms_files()
     f = glob(INDIR_DIVIDES + '*/*-' + rgi_reg + '.shp')[0]
 
     df = gpd.read_file(f)

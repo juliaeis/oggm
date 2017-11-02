@@ -86,7 +86,7 @@ gdirs = workflow.init_glacier_regions(rgidf, reset=True, force=True)
 task_list = [
     tasks.glacier_masks,
     tasks.compute_centerlines,
-    tasks.compute_downstream_lines,
+    tasks.compute_downstream_line,
     tasks.catchment_area,
     tasks.initialize_flowlines,
     tasks.catchment_width_geom,
@@ -99,6 +99,7 @@ for task in task_list:
 execute_entity_task(tasks.process_custom_climate_data, gdirs)
 tasks.compute_ref_t_stars(gdirs)
 tasks.distribute_t_stars(gdirs)
+execute_entity_task(tasks.apparent_mb, gdirs)
 
 # Inversion
 execute_entity_task(tasks.prepare_for_inversion, gdirs)

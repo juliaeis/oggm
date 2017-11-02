@@ -1,6 +1,4 @@
 """Wrappers for the single tasks, multi processor handling."""
-from __future__ import division
-
 # Built ins
 import logging
 import os
@@ -223,8 +221,8 @@ def gis_prepro_tasks(gdirs):
     task_list = [
         tasks.glacier_masks,
         tasks.compute_centerlines,
-        tasks.compute_downstream_lines,
         tasks.initialize_flowlines,
+        tasks.compute_downstream_line,
         tasks.compute_downstream_bedshape,
         tasks.catchment_area,
         tasks.catchment_intersections,
@@ -239,17 +237,21 @@ def climate_tasks(gdirs):
     """Helper function: run all climate tasks."""
 
     # I don't know where this logic is best placed...
-    if ('climate_file' in cfg.PATHS) and \
-            os.path.exists(cfg.PATHS['climate_file']):
+    if (('climate_file' in cfg.PATHS) and
+            os.path.exists(cfg.PATHS['climate_file'])):
         _process_task = tasks.process_custom_climate_data
     else:
         # OK, so use the default CRU "high-resolution" method
         _process_task = tasks.process_cru_data
     execute_entity_task(_process_task, gdirs)
 
-    # Then, only global tasks
-    tasks.compute_ref_t_stars(gdirs)
+    # Then, global tasks
+    if cfg.PARAMS['run_mb_calibration']:
+        tasks.compute_ref_t_stars(gdirs)
     tasks.distribute_t_stars(gdirs)
+
+    # And the apparent mass-balance
+    execute_entity_task(tasks.apparent_mb, gdirs)
 
 
 def inversion_tasks(gdirs):
@@ -259,7 +261,8 @@ def inversion_tasks(gdirs):
     execute_entity_task(tasks.prepare_for_inversion, gdirs)
 
     # Global task
-    tasks.optimize_inversion_params(gdirs)
+    if cfg.PARAMS['optimize_inversion_params']:
+        tasks.optimize_inversion_params(gdirs)
 
     # Inversion for all glaciers
     execute_entity_task(tasks.volume_inversion, gdirs)

@@ -9,10 +9,10 @@ from distutils.version import LooseVersion
 import matplotlib.ft2font
 import matplotlib.pyplot as plt
 import osgeo.gdal
-import six
-from six.moves.urllib.request import urlopen
+from urllib.request import urlopen
 
 from oggm import cfg
+from oggm.utils import SAMPLE_DATA_COMMIT
 
 # Defaults
 logging.basicConfig(format='%(asctime)s: %(name)s: %(message)s',
@@ -20,16 +20,11 @@ logging.basicConfig(format='%(asctime)s: %(name)s: %(message)s',
 
 # Some logic to see which environment we are running on
 
-# GDAL version changes the way interpolation is made (sigh...)
-HAS_NEW_GDAL = False
-if osgeo.gdal.__version__ >= '1.11':
-    HAS_NEW_GDAL = True
-
 # Matplotlib version changes plots, too
 HAS_MPL_FOR_TESTS = False
 if LooseVersion(matplotlib.__version__) >= LooseVersion('2'):
     HAS_MPL_FOR_TESTS = True
-    BASELINE_DIR = os.path.join(cfg.CACHE_DIR, 'oggm-sample-data-master',
+    BASELINE_DIR = os.path.join(cfg.CACHE_DIR, 'oggm-sample-data-%s' % SAMPLE_DATA_COMMIT,
                                 'baseline_images')
     ftver = LooseVersion(matplotlib.ft2font.__freetype_version__)
     if ftver >= LooseVersion('2.8.0'):
@@ -122,12 +117,6 @@ def requires_internet(test):
     # Test decorator
     msg = 'requires internet'
     return test if HAS_INTERNET else unittest.skip(msg)(test)
-
-
-def requires_py3(test):
-    # Test decorator
-    msg = "requires python3"
-    return unittest.skip(msg)(test) if six.PY2 else test
 
 
 def is_graphic_test(test):

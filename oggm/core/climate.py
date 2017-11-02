@@ -1,6 +1,4 @@
 """Climate data and mass-balance computations"""
-from __future__ import division
-
 # Built ins
 import logging
 import os
@@ -17,7 +15,8 @@ from scipy import optimize as optimization
 # Locals
 from oggm import cfg
 from oggm import utils
-from oggm import entity_task, divide_task, global_task
+from oggm.core import centerlines
+from oggm import entity_task, global_task
 
 # Module logger
 log = logging.getLogger(__name__)
@@ -575,7 +574,7 @@ def mb_yearly_climate_on_height(gdir, heights, prcp_fac,
     return years, temp_yr, prcp_yr
 
 
-def mb_yearly_climate_on_glacier(gdir, prcp_fac, div_id=None, year_range=None):
+def mb_yearly_climate_on_glacier(gdir, prcp_fac, year_range=None):
     """Yearly mass-balance climate at all glacier heights,
     multiplied with the flowlines widths. (all in pix coords.)
 
@@ -583,7 +582,7 @@ def mb_yearly_climate_on_glacier(gdir, prcp_fac, div_id=None, year_range=None):
 
     Parameters:
     -----------
-    gdir: the glacier directory
+    gdir : the glacier directory
     prcp_fac: the correction factor for precipitation
     year_range (optional): a [y0, y1] year range to get the data for specific
     (hydrological) years only
@@ -596,16 +595,7 @@ def mb_yearly_climate_on_glacier(gdir, prcp_fac, div_id=None, year_range=None):
         - prcpsol:  array of shape (len(heights), ny) (not corrected!)
     """
 
-    flowlines = []
-    if div_id is None:
-        raise ValueError('Must specify div_id')
-
-    if div_id == 0:
-        for i in gdir.divide_ids:
-            flowlines.extend(gdir.read_pickle('inversion_flowlines',
-                                              div_id=i))
-    else:
-        flowlines = gdir.read_pickle('inversion_flowlines', div_id=div_id)
+    flowlines = gdir.read_pickle('inversion_flowlines')
 
     heights = np.array([])
     widths = np.array([])
@@ -624,8 +614,7 @@ def mb_yearly_climate_on_glacier(gdir, prcp_fac, div_id=None, year_range=None):
 
 
 @entity_task(log, writes=['mu_candidates'])
-@divide_task(log, add_0=True)
-def mu_candidates(gdir, div_id=None, prcp_sf=None):
+def mu_candidates(gdir, prcp_sf=None):
     """Computes the mu candidates.
 
     For each 31 year-period centered on the year of interest, mu is is the
@@ -650,7 +639,6 @@ def mu_candidates(gdir, div_id=None, prcp_sf=None):
     y1 = y1 or ci['hydro_yr_1']
 
     years, temp_yr, prcp_yr = mb_yearly_climate_on_glacier(gdir, 1.,
-                                                           div_id=div_id,
                                                            year_range=[y0, y1])
 
     # Be sure we have no marine terminating glacier
@@ -685,7 +673,7 @@ def mu_candidates(gdir, div_id=None, prcp_sf=None):
 
     # Write
     df = pd.DataFrame(data=mu_yr_clim, index=years, columns=sf)
-    gdir.write_pickle(df, 'mu_candidates', div_id=div_id)
+    gdir.write_pickle(df, 'mu_candidates')
 
 
 def t_star_from_refmb(gdir, mbdf):
@@ -704,8 +692,7 @@ def t_star_from_refmb(gdir, mbdf):
     """
 
     # Only divide 0, we believe the original RGI entities to be the ref...
-    years, temp_yr_ts, prcp_yr_ts = mb_yearly_climate_on_glacier(gdir, 1.,
-                                                                 div_id=0)
+    years, temp_yr_ts, prcp_yr_ts = mb_yearly_climate_on_glacier(gdir, 1.)
 
     # which years to look at
     selind = np.searchsorted(years, mbdf.index)
@@ -719,7 +706,7 @@ def t_star_from_refmb(gdir, mbdf):
     ref_mb_std = np.std(mbdf)
 
     # Average mass-balance per mu and fac
-    mu_yr_clim_df = gdir.read_pickle('mu_candidates', div_id=0)
+    mu_yr_clim_df = gdir.read_pickle('mu_candidates')
 
     odf = pd.DataFrame(index=mu_yr_clim_df.columns)
     out = dict()
@@ -796,10 +783,9 @@ def calving_mb(gdir):
     return gdir.inversion_calving_rate * 1e9 * cfg.RHO / gdir.rgi_area_m2
 
 
-@entity_task(log, writes=['local_mustar', 'inversion_flowlines'])
-def local_mustar_apparent_mb(gdir, tstar=None, bias=None, prcp_fac=None,
-                             compute_apparent_mb=True):
-    """Compute local mustar and apparent mb from tstar.
+@entity_task(log, writes=['local_mustar'])
+def local_mustar(gdir, tstar=None, bias=None, prcp_fac=None):
+    """Compute the local mustar from interpolated tstars.
 
     Parameters
     ----------
@@ -810,9 +796,6 @@ def local_mustar_apparent_mb(gdir, tstar=None, bias=None, prcp_fac=None,
         the associated reference bias
     prcp_fac: int
         the associated precipitation factor
-    compute_apparent_mb: bool
-        if you want to compute the apparent MB at the same time (recommended,
-        unless you are cross-validating for example).
     """
 
     assert bias is not None
@@ -826,73 +809,102 @@ def local_mustar_apparent_mb(gdir, tstar=None, bias=None, prcp_fac=None,
     # Do we have a calving glacier?
     cmb = calving_mb(gdir)
 
-    # Ok. Looping over divides
-    for div_id in [0] + list(gdir.divide_ids):
-        log.info('(%s) local mu* for t*=%d, divide %d',
-                 gdir.rgi_id, tstar, div_id)
+    log.info('(%s) local mu* for t*=%d', gdir.rgi_id, tstar)
 
-        # Get the corresponding mu
-        years, temp_yr, prcp_yr = mb_yearly_climate_on_glacier(gdir, prcp_fac,
-                                                               div_id=div_id,
-                                                               year_range=yr)
-        assert len(years) == (2 * mu_hp + 1)
+    # Get the corresponding mu
+    years, temp_yr, prcp_yr = mb_yearly_climate_on_glacier(gdir, prcp_fac,
+                                                           year_range=yr)
+    assert len(years) == (2 * mu_hp + 1)
 
-        # mustar is taking calving into account (units of specific MB)
-        mustar = (np.mean(prcp_yr) - cmb) / np.mean(temp_yr)
-        if not np.isfinite(mustar):
-            raise RuntimeError('{} has a non finite mu'.format(gdir.rgi_id))
+    # mustar is taking calving into account (units of specific MB)
+    mustar = (np.mean(prcp_yr) - cmb) / np.mean(temp_yr)
+    if not np.isfinite(mustar):
+        raise RuntimeError('{} has a non finite mu'.format(gdir.rgi_id))
 
-        # Scalars in a small dataframe for later
-        df = pd.DataFrame()
-        df['rgi_id'] = [gdir.rgi_id]
-        df['t_star'] = [tstar]
-        df['mu_star'] = [mustar]
-        df['prcp_fac'] = [prcp_fac]
-        df['bias'] = [bias]
-        df.to_csv(gdir.get_filepath('local_mustar', div_id=div_id),
-                  index=False)
+    # Scalars in a small dataframe for later
+    df = pd.DataFrame()
+    df['rgi_id'] = [gdir.rgi_id]
+    df['t_star'] = [tstar]
+    df['mu_star'] = [mustar]
+    df['prcp_fac'] = [prcp_fac]
+    df['bias'] = [bias]
+    df.to_csv(gdir.get_filepath('local_mustar'), index=False)
 
-        if not compute_apparent_mb:
-            continue
 
-        # For each flowline compute the apparent MB
-        # For div 0 it is kind of artificial but this is for validation
-        fls = []
-        if div_id == 0:
-            for i in gdir.divide_ids:
-                fls.extend(gdir.read_pickle('inversion_flowlines', div_id=i))
-        else:
-            fls = gdir.read_pickle('inversion_flowlines', div_id=div_id)
+@entity_task(log, writes=['inversion_flowlines'])
+def apparent_mb(gdir):
+    """Compute the apparent mb from the calibrated mustar.
 
-        # Reset flux
-        for fl in fls:
-            fl.flux = np.zeros(len(fl.surface_h))
+    Parameters
+    ----------
+    """
 
-        # Flowlines in order to be sure
-        for fl in fls:
-            y, t, p = mb_yearly_climate_on_height(gdir, fl.surface_h, prcp_fac,
-                                                  year_range=yr,
-                                                  flatten=False)
-            fl.set_apparent_mb(np.mean(p, axis=1) - mustar*np.mean(t, axis=1))
+    # Calibrated data
+    df = pd.read_csv(gdir.get_filepath('local_mustar')).iloc[0]
+    tstar = df['t_star']
+    prcp_fac = df['prcp_fac']
+    mu_star = df['mu_star']
+    bias = df['bias']
 
-        # Check and write
-        if div_id > 0:
-            aflux = fls[-1].flux[-1] * 1e-9 / cfg.RHO * gdir.grid.dx**2
-            # If not marine and a bit far from zero, warning
-            if cmb == 0 and not np.allclose(fls[-1].flux[-1], 0., atol=0.01):
-                log.warning('(%s) flux should be zero, but is: '
-                            '%.4f km3 ice yr-1', gdir.rgi_id, aflux)
-            # If not marine and quite far from zero, error
-            if cmb == 0 and not np.allclose(fls[-1].flux[-1], 0., atol=1):
-                msg = ('({}) flux should be zero, but is: {:.4f} km3 ice yr-1'
-                       .format(gdir.rgi_id, aflux))
-                raise RuntimeError(msg)
-            gdir.write_pickle(fls, 'inversion_flowlines', div_id=div_id)
+    # Climate period
+    mu_hp = int(cfg.PARAMS['mu_star_halfperiod'])
+    yr = [tstar-mu_hp, tstar+mu_hp]
+
+    # Do we have a calving glacier?
+    cmb = calving_mb(gdir)
+
+    # For each flowline compute the apparent MB
+    fls = gdir.read_pickle('inversion_flowlines')
+
+    # Reset flux
+    for fl in fls:
+        fl.flux = np.zeros(len(fl.surface_h))
+
+    # Flowlines in order to be sure
+    for fl in fls:
+        y, t, p = mb_yearly_climate_on_height(gdir, fl.surface_h, prcp_fac,
+                                              year_range=yr,
+                                              flatten=False)
+        fl.set_apparent_mb(np.mean(p, axis=1) - mu_star*np.mean(t, axis=1))
+
+    # Sometimes, low lying tributaries have a non-physically consistent
+    # Mass-balance. We should remove these, and start all over again until
+    # all tributaries are consistent
+    do_filter = [fl.flux_needed_correction for fl in fls]
+    if cfg.PARAMS['filter_for_neg_flux'] and np.any(do_filter):
+        assert not do_filter[-1]  # This should not happen
+        # Keep only the good lines
+        heads = [fl.orig_head for fl in fls if not fl.flux_needed_correction]
+        centerlines.compute_centerlines(gdir, heads=heads, reset=True)
+        centerlines.initialize_flowlines(gdir, reset=True)
+        if gdir.has_file('downstream_line'):
+            centerlines.compute_downstream_line(gdir, reset=True)
+            centerlines.compute_downstream_bedshape(gdir, reset=True)
+        centerlines.catchment_area(gdir, reset=True)
+        centerlines.catchment_intersections(gdir, reset=True)
+        centerlines.catchment_width_geom(gdir, reset=True)
+        centerlines.catchment_width_correction(gdir, reset=True)
+        local_mustar(gdir, tstar=tstar, bias=bias, prcp_fac=prcp_fac,
+                     reset=True)
+        # Ok, re-call ourselves
+        return apparent_mb(gdir, reset=True)
+
+    # Check and write
+    aflux = fls[-1].flux[-1] * 1e-9 / cfg.RHO * gdir.grid.dx**2
+    # If not marine and a bit far from zero, warning
+    if cmb == 0 and not np.allclose(fls[-1].flux[-1], 0., atol=0.01):
+        log.warning('(%s) flux should be zero, but is: '
+                    '%.4f km3 ice yr-1', gdir.rgi_id, aflux)
+    # If not marine and quite far from zero, error
+    if cmb == 0 and not np.allclose(fls[-1].flux[-1], 0., atol=1):
+        msg = ('({}) flux should be zero, but is: {:.4f} km3 ice yr-1'
+               .format(gdir.rgi_id, aflux))
+        raise RuntimeError(msg)
+    gdir.write_pickle(fls, 'inversion_flowlines')
 
 
 @entity_task(log, writes=['inversion_flowlines', 'linear_mb_params'])
-@divide_task(log, add_0=True)
-def apparent_mb_from_linear_mb(gdir, div_id=None, mb_gradient=3.):
+def apparent_mb_from_linear_mb(gdir, mb_gradient=3.):
     """Compute apparent mb from a linear mass-balance assumption (for testing).
 
     This is for testing currently, but could be used as alternative method
@@ -907,30 +919,21 @@ def apparent_mb_from_linear_mb(gdir, div_id=None, mb_gradient=3.):
     cmb = calving_mb(gdir)
 
     # Get the height and widths along the fls
-    if div_id == 0:
-        h, w = gdir.get_inversion_flowline_hw()
-    else:
-        h, w = gdir.get_inversion_flowline_hw(div_id=div_id)
+    h, w = gdir.get_inversion_flowline_hw()
 
     # Now find the ELA till the integrated mb is zero
-    from oggm.core.models.massbalance import LinearMassBalanceModel
+    from oggm.core.massbalance import LinearMassBalance
     def to_minimize(ela_h):
-        mbmod = LinearMassBalanceModel(ela_h[0], grad=mb_gradient)
+        mbmod = LinearMassBalance(ela_h[0], grad=mb_gradient)
         smb = mbmod.get_specific_mb(h, w)
         return (smb - cmb)**2
 
     ela_h = optimization.minimize(to_minimize, [0.], bounds=((0, 10000), ))
     ela_h = ela_h['x'][0]
-    mbmod = LinearMassBalanceModel(ela_h, grad=mb_gradient)
+    mbmod = LinearMassBalance(ela_h, grad=mb_gradient)
 
     # For each flowline compute the apparent MB
-    # For div 0 it is kind of artificial but this is for validation
-    fls = []
-    if div_id == 0:
-        for i in gdir.divide_ids:
-            fls.extend(gdir.read_pickle('inversion_flowlines', div_id=i))
-    else:
-        fls = gdir.read_pickle('inversion_flowlines', div_id=div_id)
+    fls = gdir.read_pickle('inversion_flowlines')
 
     # Reset flux
     for fl in fls:
@@ -942,38 +945,19 @@ def apparent_mb_from_linear_mb(gdir, div_id=None, mb_gradient=3.):
         fl.set_apparent_mb(mbz)
 
     # Check and write
-    if div_id > 0:
-        aflux = fls[-1].flux[-1] * 1e-9 / cfg.RHO * gdir.grid.dx**2
-        # If not marine and a bit far from zero, warning
-        if cmb == 0 and not np.allclose(fls[-1].flux[-1], 0., atol=0.01):
-            log.warning('(%s) flux should be zero, but is: '
-                        '%.4f km3 ice yr-1', gdir.rgi_id, aflux)
-        # If not marine and quite far from zero, error
-        if cmb == 0 and not np.allclose(fls[-1].flux[-1], 0., atol=1):
-            msg = ('({}) flux should be zero, but is: {:.4f} km3 ice yr-1'
-                   .format(gdir.rgi_id, aflux))
-            raise RuntimeError(msg)
-        gdir.write_pickle(fls, 'inversion_flowlines', div_id=div_id)
-
+    aflux = fls[-1].flux[-1] * 1e-9 / cfg.RHO * gdir.grid.dx**2
+    # If not marine and a bit far from zero, warning
+    if cmb == 0 and not np.allclose(fls[-1].flux[-1], 0., atol=0.01):
+        log.warning('(%s) flux should be zero, but is: '
+                    '%.4f km3 ice yr-1', gdir.rgi_id, aflux)
+    # If not marine and quite far from zero, error
+    if cmb == 0 and not np.allclose(fls[-1].flux[-1], 0., atol=1):
+        msg = ('({}) flux should be zero, but is: {:.4f} km3 ice yr-1'
+               .format(gdir.rgi_id, aflux))
+        raise RuntimeError(msg)
+    gdir.write_pickle(fls, 'inversion_flowlines')
     gdir.write_pickle({'ela_h': ela_h, 'grad': mb_gradient},
-                      'linear_mb_params', div_id=div_id)
-
-
-def _get_ref_glaciers(gdirs):
-    """Get the list of glaciers we have valid data for."""
-
-    flink, _ = utils.get_wgms_files()
-    dfids = pd.read_csv(flink)[gdirs[0].rgi_version + '_ID'].values
-
-    # TODO: we removed marine glaciers here. Is it ok?
-    ref_gdirs = []
-    for g in gdirs:
-        if g.rgi_id not in dfids or g.terminus_type != 'Land-terminating':
-            continue
-        mbdf = g.get_ref_mb_data()
-        if len(mbdf) >= 5:
-            ref_gdirs.append(g)
-    return ref_gdirs
+                      'linear_mb_params')
 
 
 def _get_optimal_scaling_factor(ref_gdirs):
@@ -1012,10 +996,17 @@ def compute_ref_t_stars(gdirs):
     gdirs: list of oggm.GlacierDirectory objects
     """
 
+    if not cfg.PARAMS['run_mb_calibration']:
+        raise RuntimeError('Are you sure you want to calibrate the reference '
+                           't*? There is a pre-calibrated version available. '
+                           'If you know what you are doing and still want to '
+                           'calibrate, set the `run_mb_calibration` parameter '
+                           'to `True`.')
+
     log.info('Compute the reference t* and mu* for WGMS glaciers')
 
     # Reference glaciers only if in the list and period is good
-    ref_gdirs = _get_ref_glaciers(gdirs)
+    ref_gdirs = utils.get_ref_mb_glaciers(gdirs)
 
     prcp_sf = None
     if cfg.PARAMS['prcp_scaling_factor'] == 'stddev':
@@ -1042,19 +1033,16 @@ def compute_ref_t_stars(gdirs):
     # know how to start
     if len(only_one) == 0:
         # TODO: hardcoded stuff here, for the test workflow
-        if 'RGI50-11.00897' in per_glacier:
-            only_one.append('RGI50-11.00897')
-            gdir, t_star, res_bias, prcp_fac = per_glacier['RGI50-11.00897']
-            per_glacier['RGI50-11.00897'] = (gdir, [t_star[-1]],
-                                             [res_bias[-1]], prcp_fac)
-        elif 'RGI40-11.00897' in per_glacier:
-            only_one.append('RGI40-11.00897')
-            gdir, t_star, res_bias, prcp_fac = per_glacier['RGI40-11.00897']
-            per_glacier['RGI40-11.00897'] = (gdir, [t_star[-1]],
-                                             [res_bias[-1]], prcp_fac)
-        else:
-            raise RuntimeError('We need at least one glacier with one '
-                               'tstar only.')
+        for v in ['4', '5', '6']:
+            rid = 'RGI{}0-11.00897'.format(v)
+            if rid in per_glacier:
+                only_one.append(rid)
+                gdir, t_star, res_bias, prcp_fac = per_glacier[rid]
+                per_glacier[rid] = (gdir, [t_star[-1]], [res_bias[-1]],
+                                    prcp_fac)
+    if len(only_one) == 0:
+        raise RuntimeError('We need at least one glacier with one '
+                           'tstar only.')
 
     log.info('%d out of %d have only one possible t*. Start from here',
              len(only_one), len(ref_gdirs))
@@ -1114,21 +1102,28 @@ def compute_ref_t_stars(gdirs):
 
 
 @global_task
-def distribute_t_stars(gdirs, compute_apparent_mb=True, ref_df=None):
+def distribute_t_stars(gdirs, ref_df=None):
     """After the computation of the reference tstars, apply
     the interpolation to each individual glacier.
 
     Parameters
     ----------
     gdirs : list of oggm.GlacierDirectory objects
-    compute_apparent_mb : bool (defaults to True)
     """
 
     log.info('Distribute t* and mu*')
 
     if ref_df is None:
-        ref_df = pd.read_csv(os.path.join(cfg.PATHS['working_dir'],
-                                          'ref_tstars.csv'))
+        fp = os.path.join(cfg.PATHS['working_dir'], 'ref_tstars.csv')
+        if not cfg.PARAMS['run_mb_calibration']:
+            # Make some checks and use the default one
+            if (('climate_file' in cfg.PATHS) and
+                    os.path.exists(cfg.PATHS['climate_file'])):
+                raise RuntimeError('If you are using a custom climate file '
+                                   'you should run your own MB calibration.')
+            fn = 'oggm_ref_tstars_rgi{}_cru4.csv'.format(gdirs[0].rgi_version)
+            fp = utils.get_demo_file(fn)
+        ref_df = pd.read_csv(fp)
 
     for gdir in gdirs:
 
@@ -1152,19 +1147,17 @@ def distribute_t_stars(gdirs, compute_apparent_mb=True, ref_df=None):
             bias = np.average(amin.bias, weights=1./distances)
 
         # Go
-        local_mustar_apparent_mb(gdir, tstar=tstar, bias=bias,
-                                 prcp_fac=prcp_fac,
-                                 compute_apparent_mb=compute_apparent_mb,
-                                 reset=True)
+        local_mustar(gdir, tstar=tstar, bias=bias, prcp_fac=prcp_fac,
+                     reset=True)
 
 
 @global_task
 def crossval_t_stars(gdirs):
     """Cross-validate the interpolation of tstar to each individual glacier.
 
-    This is a naive, thorough check (redoes many, many useless calculations).
-
-    you can use quick_crossval_t_stars for most purposes,
+    This is a thorough check (redoes many calculations) because it recomputes
+    the chosen tstars at each time. You should use quick_crossval_t_stars
+    instead.
 
     Parameters
     ----------
@@ -1176,7 +1169,7 @@ def crossval_t_stars(gdirs):
     full_ref_df = pd.read_csv(os.path.join(cfg.PATHS['working_dir'],
                                            'ref_tstars.csv'), index_col=0)
 
-    rgdirs = _get_ref_glaciers(gdirs)
+    rgdirs = utils.get_ref_mb_glaciers(gdirs)
     n = len(full_ref_df)
     for i, rid in enumerate(full_ref_df.index):
 
@@ -1191,7 +1184,7 @@ def crossval_t_stars(gdirs):
         # redo the computations
         with utils.DisableLogger():
             compute_ref_t_stars(ref_gdirs)
-            distribute_t_stars([gdir], compute_apparent_mb=False)
+            distribute_t_stars([gdir])
 
         # store
         rdf = pd.read_csv(gdir.get_filepath('local_mustar'))
@@ -1219,7 +1212,7 @@ def quick_crossval_t_stars(gdirs):
 
     log.info('Cross-validate the t* and mu* determination')
 
-    rgdirs = _get_ref_glaciers(gdirs)
+    rgdirs = utils.get_ref_mb_glaciers(gdirs)
 
     # This might be redundant but we redo the calc here
     with utils.DisableLogger():
@@ -1227,7 +1220,7 @@ def quick_crossval_t_stars(gdirs):
     full_ref_df = pd.read_csv(os.path.join(cfg.PATHS['working_dir'],
                                            'ref_tstars.csv'), index_col=0)
     with utils.DisableLogger():
-        distribute_t_stars(rgdirs, compute_apparent_mb=False)
+        distribute_t_stars(rgdirs)
 
     n = len(full_ref_df)
     for i, rid in enumerate(full_ref_df.index):
@@ -1246,8 +1239,7 @@ def quick_crossval_t_stars(gdirs):
 
         # redo the computations
         with utils.DisableLogger():
-            distribute_t_stars([gdir], ref_df=tmp_ref_df,
-                               compute_apparent_mb=False)
+            distribute_t_stars([gdir], ref_df=tmp_ref_df)
 
         # store
         rdf = pd.read_csv(gdir.get_filepath('local_mustar'))
