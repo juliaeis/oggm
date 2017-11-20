@@ -22,7 +22,8 @@ from oggm import workflow
 from oggm.utils import get_demo_file, rmsd, write_centerlines_to_shape
 from oggm.tests import is_slow, RUN_WORKFLOW_TESTS
 from oggm.tests import is_graphic_test, BASELINE_DIR
-from oggm.tests.funcs import get_test_dir, use_multiprocessing
+from oggm.tests.funcs import (get_test_dir, use_multiprocessing,
+                              patch_url_retrieve)
 from oggm.core import flowline, massbalance
 from oggm import tasks
 from oggm import utils
@@ -34,6 +35,17 @@ if not RUN_WORKFLOW_TESTS:
 # Globals
 TEST_DIR = os.path.join(get_test_dir(), 'tmp_workflow')
 CLI_LOGF = os.path.join(TEST_DIR, 'clilog.pkl')
+
+_url_retrieve = None
+
+
+def setup_module(module):
+    module._url_retrieve = utils._urlretrieve
+    utils._urlretrieve = patch_url_retrieve
+
+
+def teardown_module(module):
+    utils._urlretrieve = module._url_retrieve
 
 
 def clean_dir(testdir):
@@ -78,9 +90,7 @@ def up_to_climate(reset=False):
     cfg.PARAMS['use_optimized_inversion_params'] = True
     cfg.PARAMS['tstar_search_window'] = [1902, 0]
     cfg.PARAMS['invert_with_rectangular'] = False
-
-    # Reset MP
-    workflow.reset_multiprocessing()
+    cfg.PARAMS['run_mb_calibration'] = True
 
     # Go
     gdirs = workflow.init_glacier_regions(rgidf)
@@ -118,7 +128,6 @@ def up_to_inversion(reset=False):
         cfg.PARAMS['temp_use_local_gradient'] = True
         cfg.PATHS['climate_file'] = get_demo_file('HISTALP_oetztal.nc')
         cfg.PATHS['cru_dir'] = ''
-        workflow.reset_multiprocessing()
         workflow.climate_tasks(gdirs)
         with open(CLI_LOGF, 'wb') as f:
             pickle.dump('histalp', f)
@@ -152,7 +161,6 @@ def up_to_distrib(reset=False):
         cfg.PATHS['climate_file'] = ''
         cru_dir = get_demo_file('cru_ts3.23.1901.2014.tmp.dat.nc')
         cfg.PATHS['cru_dir'] = os.path.dirname(cru_dir)
-        workflow.reset_multiprocessing()
         with warnings.catch_warnings():
             # There is a warning from salem
             warnings.simplefilter("ignore")
@@ -234,6 +242,7 @@ class TestWorkflow(unittest.TestCase):
         self.assertTrue(np.all(dfc.terminus_type == 'Land-terminating'))
         cc = dfc[['dem_mean_elev', 'clim_temp_avgh']].corr().values[0, 1]
         assert cc > 0.3
+        assert np.all(dfc.t_star > 1900)
 
     @is_slow
     def test_crossval(self):
@@ -271,6 +280,7 @@ class TestWorkflow(unittest.TestCase):
         workflow.execute_entity_task(tasks.apparent_mb, gdirs)
         assert np.all(np.abs(df.cv_bias) < 50)
         assert np.all(np.abs(dfq.cv_bias) < 50)
+        # The biases aren't entirely equivalent and its ok
         np.testing.assert_allclose(df.cv_prcp_fac, dfq.cv_prcp_fac)
 
         # see if the process didn't brake anything
@@ -314,7 +324,7 @@ class TestWorkflow(unittest.TestCase):
         self.assertTrue(shp is not None)
         shp = shp.loc[shp.RGIID == 'RGI50-11.00897']
         self.assertEqual(len(shp), 3)
-        self.assertEqual(shp.loc[shp.LE_SEGMENT.argmax()].MAIN, 1)
+        self.assertEqual(shp.loc[shp.LE_SEGMENT.idxmax()].MAIN, 1)
 
     @is_slow
     def test_random(self):
@@ -412,6 +422,10 @@ def test_plot_region_inversion():
 def test_plot_region_model():
 
     gdirs = random_for_plot()
+
+    dfc = utils.compile_task_log(gdirs,
+                                 task_names=['random_glacier_evolution_plot'])
+    assert np.all(dfc['random_glacier_evolution_plot'] == 'SUCCESS')
 
     # We prepare for the plot, which needs our own map to proceed.
     # Lets do a local mercator grid

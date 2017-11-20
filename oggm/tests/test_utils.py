@@ -16,10 +16,23 @@ import oggm
 from oggm import utils
 from oggm import cfg
 from oggm.tests import is_download
-from oggm.tests.funcs import get_test_dir
+from oggm.tests.funcs import get_test_dir, patch_url_retrieve
 
-# In case some logging happens or so
-cfg.PATHS['working_dir'] = get_test_dir()
+_url_retrieve = None
+
+
+def setup_module(module):
+    module._url_retrieve = utils._urlretrieve
+    utils._urlretrieve = patch_url_retrieve
+
+
+def teardown_module(module):
+    utils._urlretrieve = module._url_retrieve
+
+
+def clean_dir(testdir):
+    shutil.rmtree(testdir)
+    os.makedirs(testdir)
 
 
 class TestFuncs(unittest.TestCase):
@@ -65,82 +78,123 @@ class TestFuncs(unittest.TestCase):
         expected = 'Special Glacier'
         self.assertTrue(utils.filter_rgi_name(name), expected)
 
-    def test_year_to_date(self):
+    def test_floatyear_to_date(self):
 
-        r = utils.year_to_date(0)
+        r = utils.floatyear_to_date(0)
         self.assertEqual(r, (0, 1))
 
-        y, m = utils.year_to_date([0, 1])
+        y, m = utils.floatyear_to_date([0, 1])
         np.testing.assert_array_equal(y, [0, 1])
         np.testing.assert_array_equal(m, [1, 1])
 
-        y, m = utils.year_to_date([0.00001, 1.00001])
+        y, m = utils.floatyear_to_date([0.00001, 1.00001])
         np.testing.assert_array_equal(y, [0, 1])
         np.testing.assert_array_equal(m, [1, 1])
 
-        y, m = utils.year_to_date([0.99999, 1.99999])
+        y, m = utils.floatyear_to_date([0.99999, 1.99999])
         np.testing.assert_array_equal(y, [0, 1])
         np.testing.assert_array_equal(m, [12, 12])
 
-        yr = 1998 + cfg.CUMSEC_IN_MONTHS[2] / cfg.SEC_IN_YEAR
-        r = utils.year_to_date(yr)
+        yr = 1998 + cfg.CUMSEC_IN_MONTHS_HYDRO[2] / cfg.SEC_IN_YEAR
+        r = utils.floatyear_to_date(yr)
         self.assertEqual(r, (1998, 4))
 
-        yr = 1998 + (cfg.CUMSEC_IN_MONTHS[2] - 1) / cfg.SEC_IN_YEAR
-        r = utils.year_to_date(yr)
+        yr = 1998 + (cfg.CUMSEC_IN_MONTHS_HYDRO[2] - 1) / cfg.SEC_IN_YEAR
+        r = utils.floatyear_to_date(yr)
         self.assertEqual(r, (1998, 3))
 
-    def test_date_to_year(self):
+        yr = 1998 + cfg.CUMSEC_IN_MONTHS[2] / cfg.SEC_IN_YEAR
+        r = utils.floatyear_to_date(yr, hydro_year=False)
+        self.assertEqual(r, (1998, 4))
 
-        r = utils.date_to_year(0, 1)
+    def test_date_to_floatyear(self):
+
+        r = utils.date_to_floatyear(0, 1)
         self.assertEqual(r, 0)
 
-        r = utils.date_to_year(1, 1)
+        r = utils.date_to_floatyear(1, 1)
         self.assertEqual(r, 1)
 
-        r = utils.date_to_year([0, 1], [1, 1])
+        r = utils.date_to_floatyear([0, 1], [1, 1])
         np.testing.assert_array_equal(r, [0, 1])
 
-        yr = utils.date_to_year([1998, 1998], [6, 7])
-        y, m = utils.year_to_date(yr)
+        yr = utils.date_to_floatyear([1998, 1998], [6, 7])
+        y, m = utils.floatyear_to_date(yr)
         np.testing.assert_array_equal(y, [1998, 1998])
         np.testing.assert_array_equal(m, [6, 7])
 
-        yr = utils.date_to_year([1998, 1998], [2, 3])
-        y, m = utils.year_to_date(yr)
+        yr = utils.date_to_floatyear([1998, 1998], [2, 3])
+        y, m = utils.floatyear_to_date(yr)
         np.testing.assert_array_equal(y, [1998, 1998])
         np.testing.assert_array_equal(m, [2, 3])
 
         time = pd.date_range('1/1/1800', periods=300*12-11, freq='MS')
-        yr = utils.date_to_year(time.year, time.month)
-        y, m = utils.year_to_date(yr)
+        yr = utils.date_to_floatyear(time.year, time.month)
+        y, m = utils.floatyear_to_date(yr)
         np.testing.assert_array_equal(y, time.year)
         np.testing.assert_array_equal(m, time.month)
 
         myr = utils.monthly_timeseries(1800, 2099)
-        y, m = utils.year_to_date(myr)
+        y, m = utils.floatyear_to_date(myr)
         np.testing.assert_array_equal(y, time.year)
         np.testing.assert_array_equal(m, time.month)
 
         myr = utils.monthly_timeseries(1800, ny=300)
-        y, m = utils.year_to_date(myr)
+        y, m = utils.floatyear_to_date(myr)
         np.testing.assert_array_equal(y, time.year)
         np.testing.assert_array_equal(m, time.month)
 
         time = pd.period_range('0001-01', '6000-1', freq='M')
         myr = utils.monthly_timeseries(1, 6000)
-        y, m = utils.year_to_date(myr)
+        y, m = utils.floatyear_to_date(myr)
         np.testing.assert_array_equal(y, time.year)
         np.testing.assert_array_equal(m, time.month)
 
         time = pd.period_range('0001-01', '6000-12', freq='M')
         myr = utils.monthly_timeseries(1, 6000, include_last_year=True)
-        y, m = utils.year_to_date(myr)
+        y, m = utils.floatyear_to_date(myr)
         np.testing.assert_array_equal(y, time.year)
         np.testing.assert_array_equal(m, time.month)
 
+        yrh = utils.date_to_floatyear(np.arange(12)+1, np.arange(12)+1)
+        yrn = utils.date_to_floatyear(np.arange(12)+1, np.arange(12)+1,
+                                      hydro_year=False)
+        assert not np.allclose(yrh, yrn)
+
         with self.assertRaises(ValueError):
             utils.monthly_timeseries(1)
+
+    def test_hydro_convertion(self):
+
+        y, m = utils.hydrodate_to_calendardate(1, 1)
+        assert (y, m) == (0, 10)
+        y, m = utils.hydrodate_to_calendardate(1, 4)
+        assert (y, m) == (1, 1)
+        y, m = utils.hydrodate_to_calendardate(1, 12)
+        assert (y, m) == (1, 9)
+
+        y, m = utils.hydrodate_to_calendardate([1, 1, 1], [1, 4, 12])
+        np.testing.assert_array_equal(y, [0, 1, 1])
+        np.testing.assert_array_equal(m, [10, 1, 9])
+
+        y, m = utils.calendardate_to_hydrodate(1, 1)
+        assert (y, m) == (1, 4)
+        y, m = utils.calendardate_to_hydrodate(1, 9)
+        assert (y, m) == (1, 12)
+        y, m = utils.calendardate_to_hydrodate(1, 10)
+        assert (y, m) == (2, 1)
+
+        y, m = utils.calendardate_to_hydrodate([1, 1, 1], [1, 9, 10])
+        np.testing.assert_array_equal(y, [1, 1, 2])
+        np.testing.assert_array_equal(m, [4, 12, 1])
+
+        # Roundtrip
+        time = pd.period_range('0001-01', '1000-12', freq='M')
+        y, m = utils.calendardate_to_hydrodate(time.year, time.month)
+        y, m = utils.hydrodate_to_calendardate(y, m)
+        np.testing.assert_array_equal(y, time.year)
+        np.testing.assert_array_equal(m, time.month)
+
 
 
 class TestInitialize(unittest.TestCase):
@@ -278,6 +332,25 @@ class TestFakeDownloads(unittest.TestCase):
         assert os.path.exists(os.path.join(rgi, '000_rgi50_manifest.txt'))
         assert os.path.exists(os.path.join(rgi, '01_rgi50_Region', 'test.txt'))
 
+        # Make a fake RGI file
+        rgi_dir = os.path.join(self.dldir, 'rgi60')
+        utils.mkdir(rgi_dir)
+        make_fake_zipdir(os.path.join(rgi_dir, '01_rgi60_Region'),
+                         fakefile='test.txt')
+        rgi_f = make_fake_zipdir(rgi_dir, fakefile='000_rgi60_manifest.txt')
+
+        def down_check(url, cache_name=None, reset=False):
+            expected = 'http://www.glims.org/RGI/rgi60_files/00_rgi60.zip'
+            self.assertEqual(url, expected)
+            return rgi_f
+
+        with FakeDownloadManager('_progress_urlretrieve', down_check):
+            rgi = utils.get_rgi_dir(version='6')
+
+        assert os.path.isdir(rgi)
+        assert os.path.exists(os.path.join(rgi, '000_rgi60_manifest.txt'))
+        assert os.path.exists(os.path.join(rgi, '01_rgi60_Region', 'test.txt'))
+
     def test_rgi_intersects(self):
 
         # Make a fake RGI file
@@ -300,38 +373,37 @@ class TestFakeDownloads(unittest.TestCase):
         assert os.path.exists(os.path.join(rgi,
                                            'Intersects_OGGM_Manifest.txt'))
 
-    def test_rgi_corrected(self):
-
         # Make a fake RGI file
-        rgi_dir = os.path.join(self.dldir, 'rgi50')
+        rgi_dir = os.path.join(self.dldir, 'rgi60')
         utils.mkdir(rgi_dir)
-        make_fake_zipdir(os.path.join(rgi_dir, 'RGIV5_Corrected'),
-                         fakefile='RGIV5_Corrected_OGGM_Manifest.txt')
+        make_fake_zipdir(os.path.join(rgi_dir, 'RGI_V6_Intersects'),
+                         fakefile='Intersects_OGGM_Manifest.txt')
         rgi_f = make_fake_zipdir(rgi_dir)
 
         def down_check(url, cache_name=None, reset=False):
-            expected = ('https://www.dropbox.com/s/85xdglv0zredue9/' +
-                        'RGIV5_Corrected.zip?dl=1')
+            expected = ('https://www.dropbox.com/s/vawryxl8lkzxowu/' +
+                        'RGI_V6_Intersects.zip?dl=1')
             self.assertEqual(url, expected)
             return rgi_f
 
         with FakeDownloadManager('_progress_urlretrieve', down_check):
-            rgi = utils.get_rgi_corrected_dir()
+            rgi = utils.get_rgi_intersects_dir(version='6')
 
         assert os.path.isdir(rgi)
-        assert os.path.exists(os.path.join(rgi, 'RGIV5_Corrected_OGGM_Manifest.txt'))
+        assert os.path.exists(os.path.join(rgi,
+                                           'Intersects_OGGM_Manifest.txt'))
 
     def test_cru(self):
 
         # Create fake cru file
-        cf = os.path.join(self.dldir, 'cru_ts3.24.01.1901.2015.tmp.dat.nc.gz')
+        cf = os.path.join(self.dldir, 'cru_ts4.01.1901.2016.tmp.dat.nc.gz')
         with gzip.open(cf, 'wb') as gz:
             gz.write(b'dummy')
 
         def down_check(url, cache_name=None, reset=False):
-            expected = ('https://crudata.uea.ac.uk/cru/data/hrg/'
-                        'cru_ts_3.24.01/cruts.1701201703.v3.24.01/tmp/'
-                        'cru_ts3.24.01.1901.2015.tmp.dat.nc.gz')
+            expected = ('https://crudata.uea.ac.uk/cru/data/hrg/cru_ts_4.01/'
+                        'cruts.1709081022.v4.01/tmp/'
+                        'cru_ts4.01.1901.2016.tmp.dat.nc.gz')
             self.assertEqual(url, expected)
             return cf
 
@@ -454,7 +526,7 @@ class TestDataFiles(unittest.TestCase):
         cfg.initialize()
 
         lf, df = utils.get_wgms_files()
-        self.assertTrue(os.path.exists(lf))
+        self.assertTrue(os.path.exists(df))
 
         lf = utils.get_glathida_file()
         self.assertTrue(os.path.exists(lf))
@@ -672,8 +744,20 @@ class TestDataFiles(unittest.TestCase):
         tmp = cfg.PATHS['rgi_dir']
         cfg.PATHS['rgi_dir'] = os.path.join(self.dldir, 'rgi_extract')
 
-        of = utils.get_rgi_dir()
+        of = utils.get_rgi_dir(version='5')
         of = os.path.join(of, '01_rgi50_Alaska', '01_rgi50_Alaska.shp')
+        self.assertTrue(os.path.exists(of))
+
+        cfg.PATHS['rgi_dir'] = tmp
+
+    @is_download
+    def test_download_rgi6(self):
+
+        tmp = cfg.PATHS['rgi_dir']
+        cfg.PATHS['rgi_dir'] = os.path.join(self.dldir, 'rgi_extract')
+
+        of = utils.get_rgi_dir(version='6')
+        of = os.path.join(of, '01_rgi60_Alaska', '01_rgi60_Alaska.shp')
         self.assertTrue(os.path.exists(of))
 
         cfg.PATHS['rgi_dir'] = tmp
@@ -687,18 +771,6 @@ class TestDataFiles(unittest.TestCase):
         of = utils.get_rgi_intersects_dir()
         of = os.path.join(of, '01_rgi50_Alaska',
                           'intersects_01_rgi50_Alaska.shp')
-        self.assertTrue(os.path.exists(of))
-
-        cfg.PATHS['rgi_dir'] = tmp
-
-    @is_download
-    def test_download_rgi_corrected(self):
-
-        tmp = cfg.PATHS['rgi_dir']
-        cfg.PATHS['rgi_dir'] = os.path.join(self.dldir, 'rgi_extract')
-
-        of = utils.get_rgi_corrected_dir()
-        of = os.path.join(of, '01_rgi50_Alaska', '01_rgi50_Alaska.shp')
         self.assertTrue(os.path.exists(of))
 
         cfg.PATHS['rgi_dir'] = tmp

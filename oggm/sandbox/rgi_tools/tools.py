@@ -15,7 +15,7 @@ from oggm.utils import haversine, mkdir, get_wgms_files
 
 INDIR_DIVIDES = '/home/mowglie/disk/Data/OGGM_DATA/results_global_partitioning/altitude_filter/'
 
-OUTDIR_INTERSECTS = '/home/users/fmaussion/RGI_Corrected_Intersects/'
+OUTDIR_INTERSECTS = '/home/mowglie/tmp/RGI_V6_Intersects/'
 OUTDIR_DIVIDES = '/home/mowglie/disk/Data/OGGM_DATA/RGI_V5_Modified/'
 
 
@@ -116,9 +116,7 @@ def prepare_divides(rgi_f):
     print('Start RGI reg ' + rgi_reg + ' ...')
     start_time = time.time()
 
-    flink, _ = get_wgms_files()
-    wgms = pd.read_csv(flink)
-
+    wgms, _ = get_wgms_files()
     f = glob(INDIR_DIVIDES + '*/*-' + rgi_reg + '.shp')[0]
 
     df = gpd.read_file(f)
