@@ -17,7 +17,7 @@ from oggm.core.massbalance import LinearMassBalance
 from oggm.tests import is_slow, RUN_MODEL_TESTS
 import xarray as xr
 from oggm import utils, workflow
-from oggm.cfg import N, SEC_IN_DAY, SEC_IN_YEAR, SEC_IN_MONTHS
+from oggm.cfg import N, SEC_IN_DAY, SEC_IN_YEAR, SEC_IN_MONTHS_HYDRO
 
 # Tests
 from oggm.tests.funcs import *
@@ -32,9 +32,6 @@ if not RUN_MODEL_TESTS:
 do_plot = False
 
 DOM_BORDER = 80
-
-# In case some logging happens or so
-cfg.PATHS['working_dir'] = get_test_dir()
 
 
 class TestInitFlowline(unittest.TestCase):
@@ -283,8 +280,8 @@ class TestMassBalance(unittest.TestCase):
             ref_mb_on_h = p[:, i] - mu_star * t[:, i]
             my_mb_on_h = ref_mb_on_h*0.
             for m in np.arange(12):
-                yrm = utils.date_to_year(yr, m+1)
-                tmp =  mb_mod.get_monthly_mb(h, yrm)*SEC_IN_MONTHS[m]*cfg.RHO
+                yrm = utils.date_to_floatyear(yr, m + 1)
+                tmp =  mb_mod.get_monthly_mb(h, yrm)*SEC_IN_MONTHS_HYDRO[m]*cfg.RHO
                 my_mb_on_h += tmp
 
             np.testing.assert_allclose(ref_mb_on_h,
@@ -381,12 +378,12 @@ class TestMassBalance(unittest.TestCase):
         monthly_1 = months * 0.
         monthly_2 = months * 0.
         for m in months:
-            yr = utils.date_to_year(0, m+1)
+            yr = utils.date_to_floatyear(0, m + 1)
             cmb_mod.temp_bias = 0
-            tmp = cmb_mod.get_monthly_mb(h, yr) * SEC_IN_MONTHS[m] * cfg.RHO
+            tmp = cmb_mod.get_monthly_mb(h, yr) * SEC_IN_MONTHS_HYDRO[m] * cfg.RHO
             monthly_1[m] = np.average(tmp, weights=w)
             cmb_mod.temp_bias = 1
-            tmp = cmb_mod.get_monthly_mb(h, yr) * SEC_IN_MONTHS[m] * cfg.RHO
+            tmp = cmb_mod.get_monthly_mb(h, yr) * SEC_IN_MONTHS_HYDRO[m] * cfg.RHO
             monthly_2[m] = np.average(tmp, weights=w)
 
         # check that the winter months are close but summer months no
@@ -455,13 +452,13 @@ class TestMassBalance(unittest.TestCase):
 
         # Monthly
         time = pd.date_range('1/1/1973', periods=31*12, freq='MS')
-        yrs = utils.date_to_year(time.year, time.month)
+        yrs = utils.date_to_floatyear(time.year, time.month)
 
         ref_mb = np.zeros(12)
         my_mb = np.zeros(12)
         for yr, m in zip(yrs, time.month):
-            ref_mb[m-1] += np.average(mb_ref.get_monthly_mb(h, yr) * SEC_IN_MONTHS[m-1], weights=w)
-            my_mb[m-1] += np.average(mb_mod.get_monthly_mb(h, yr) * SEC_IN_MONTHS[m-1], weights=w)
+            ref_mb[m-1] += np.average(mb_ref.get_monthly_mb(h, yr) * SEC_IN_MONTHS_HYDRO[m-1], weights=w)
+            my_mb[m-1] += np.average(mb_mod.get_monthly_mb(h, yr) * SEC_IN_MONTHS_HYDRO[m-1], weights=w)
         my_mb = my_mb / 31
         ref_mb = ref_mb / 31
         self.assertTrue(utils.rmsd(ref_mb, my_mb) < 0.1)
@@ -858,6 +855,7 @@ class TestIO(unittest.TestCase):
             os.makedirs(self.test_dir)
 
         self.gdir = init_hef(border=DOM_BORDER)
+        flowline.init_present_time_glacier(self.gdir)
         self.glen_a = 2.4e-24    # Modern style Glen parameter A
 
     def tearDown(self):
@@ -930,11 +928,13 @@ class TestIO(unittest.TestCase):
         vol_diag = []
         a_diag = []
         l_diag = []
+        ela_diag = []
         for yr in years:
             model.run_until(yr)
             vol_diag.append(model.volume_m3)
             a_diag.append(model.area_m2)
             l_diag.append(model.length_m)
+            ela_diag.append(model.mb_model.get_ela(year=yr))
             if int(yr) == yr:
                 vol_ref.append(model.volume_m3)
                 a_ref.append(model.area_m2)
@@ -948,6 +948,7 @@ class TestIO(unittest.TestCase):
         np.testing.assert_allclose(ds_diag.volume_m3, vol_diag)
         np.testing.assert_allclose(ds_diag.area_m2, a_diag)
         np.testing.assert_allclose(ds_diag.length_m, l_diag)
+        np.testing.assert_allclose(ds_diag.ela_m, ela_diag)
 
         fls = dummy_constant_bed()
         run_path = os.path.join(self.test_dir, 'ts_ideal.nc')
@@ -962,6 +963,9 @@ class TestIO(unittest.TestCase):
                                   diag_path=diag_path)
 
         ds_ = xr.open_dataset(diag_path)
+        # the identical (i.e. attrs + names) doesn't work because of date
+        del ds_diag.attrs['creation_date']
+        del ds_.attrs['creation_date']
         xr.testing.assert_identical(ds_diag, ds_)
 
         fmodel = flowline.FileModel(run_path)
@@ -1001,11 +1005,24 @@ class TestIO(unittest.TestCase):
         flowline.init_present_time_glacier(new_gdir)
         shutil.rmtree(new_dir)
 
-        self.gdir.copy_to_basedir(new_dir)
+        self.gdir.copy_to_basedir(new_dir, setup='run')
         hef_file = get_demo_file('Hintereisferner_RGI5.shp')
         entity = gpd.GeoDataFrame.from_file(hef_file).iloc[0]
         new_gdir = utils.GlacierDirectory(entity, base_dir=new_dir)
         flowline.random_glacier_evolution(new_gdir, nyears=10)
+        shutil.rmtree(new_dir)
+
+        self.gdir.copy_to_basedir(new_dir, setup='inversion')
+        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
+        entity = gpd.GeoDataFrame.from_file(hef_file).iloc[0]
+        new_gdir = utils.GlacierDirectory(entity, base_dir=new_dir)
+
+        inversion.prepare_for_inversion(new_gdir, invert_all_rectangular=True)
+        inversion.volume_inversion(new_gdir)
+        inversion.filter_inversion_output(new_gdir)
+        flowline.init_present_time_glacier(new_gdir)
+        cfg.PARAMS['use_optimized_inversion_params'] = False
+        flowline.run_constant_climate(new_gdir, nyears=10, bias=0)
         shutil.rmtree(new_dir)
 
     def test_hef(self):

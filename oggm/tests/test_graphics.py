@@ -18,14 +18,11 @@ from oggm.tests import is_graphic_test, requires_internet, RUN_GRAPHIC_TESTS
 from oggm.tests import BASELINE_DIR
 from oggm.tests.funcs import init_hef, get_test_dir
 from oggm import graphics
-from oggm.core import gis, inversion, climate, centerlines, flowline, \
-    massbalance
+from oggm.core import (gis, inversion, climate, centerlines, flowline,
+                       massbalance)
 import oggm.cfg as cfg
 from oggm.utils import get_demo_file
 from oggm import utils, workflow
-
-# In case some logging happens or so
-cfg.PATHS['working_dir'] = get_test_dir()
 
 # do we event want to run the tests?
 if not RUN_GRAPHIC_TESTS:
@@ -136,7 +133,6 @@ def test_multiple_inversion():
 
     # Init
     cfg.initialize()
-    workflow.reset_multiprocessing()
     cfg.PATHS['dem_file'] = get_demo_file('hef_srtm.tif')
     cfg.PATHS['climate_file'] = get_demo_file('histalp_merged_hef.nc')
     cfg.PARAMS['border'] = 40
@@ -214,7 +210,6 @@ def test_multiple_models():
 
     # Init
     cfg.initialize()
-    workflow.reset_multiprocessing()
     cfg.PATHS['dem_file'] = get_demo_file('hef_srtm.tif')
     cfg.PARAMS['optimize_inversion_params'] = True
     cfg.PATHS['climate_file'] = get_demo_file('histalp_merged_hef.nc')
@@ -284,7 +279,6 @@ def test_chhota_shigri():
 
     # Init
     cfg.initialize()
-    workflow.reset_multiprocessing()
     cfg.PATHS['dem_file'] = get_demo_file('dem_chhota_shigri.tif')
     cfg.PARAMS['border'] = 80
     cfg.PATHS['working_dir'] = testdir
@@ -325,7 +319,6 @@ def test_ice_cap():
     utils.mkdir(testdir, reset=True)
 
     cfg.initialize()
-    workflow.reset_multiprocessing()
     cfg.PATHS['dem_file'] = get_demo_file('dem_RGI50-05.08389.tif')
     cfg.PARAMS['border'] = 60
     cfg.PATHS['working_dir'] = testdir
@@ -360,7 +353,6 @@ def test_coxe():
 
     # Init
     cfg.initialize()
-    workflow.reset_multiprocessing()
     cfg.PATHS['dem_file'] = get_demo_file('dem_RGI50-01.10299.tif')
     cfg.PARAMS['border'] = 40
     cfg.PARAMS['use_multiple_flowlines'] = False

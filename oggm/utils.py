@@ -12,8 +12,10 @@ import math
 import datetime
 import logging
 import pickle
+import warnings
 from collections import OrderedDict
 from functools import partial, wraps
+from time import gmtime, strftime
 import json
 import time
 import fnmatch
@@ -49,8 +51,10 @@ except ImportError:
 import multiprocessing as mp
 
 # Locals
+from oggm import __version__
 import oggm.cfg as cfg
-from oggm.cfg import CUMSEC_IN_MONTHS, SEC_IN_YEAR, BEGINSEC_IN_MONTHS
+from oggm.cfg import (SEC_IN_YEAR, CUMSEC_IN_MONTHS, BEGINSEC_IN_MONTHS,
+                      CUMSEC_IN_MONTHS_HYDRO, BEGINSEC_IN_MONTHS_HYDRO)
 
 # Module logger
 logger = logging.getLogger(__name__)
@@ -58,7 +62,7 @@ logger = logging.getLogger(__name__)
 # Github repository and commit hash/branch name/tag name on that repository
 # The given commit will be downloaded from github and used as source for all sample data
 SAMPLE_DATA_GH_REPO = 'OGGM/oggm-sample-data'
-SAMPLE_DATA_COMMIT = '939fa1cd32946c1f5cf97987ab3499761e19c0d2'
+SAMPLE_DATA_COMMIT = 'a4312aff1b028445aead6c43c2c96886ed8cfaf9'
 
 CRU_SERVER = ('https://crudata.uea.ac.uk/cru/data/hrg/cru_ts_4.01/cruts'
               '.1709081022.v4.01/')
@@ -725,8 +729,10 @@ def mkdir(path, reset=False):
     if reset and os.path.exists(path):
         shutil.rmtree(path)
 
-    if not os.path.exists(path):
+    try:
         os.makedirs(path)
+    except FileExistsError:
+        pass
 
 
 def include_patterns(*patterns):
@@ -1080,39 +1086,137 @@ def polygon_intersections(gdf):
     return out
 
 
-def year_to_date(yr):
-    """Converts a float year to an actual (year, month) tuple.
+def floatyear_to_date(yr, hydro_year=True):
+    """Converts a float year to an actual (year, month) pair.
 
-    Note that this doesn't account for leap years.
+    Note that this doesn't account for leap years (365-day no leap calendar).
+    The default is to use the hydrological year convention, i.e. the first
+    month of the year is October. In practice, this makes a very small
+    difference: the intervals between months are not exactly the same if
+    you start with October or January.
+
+    Parameters
+    ----------
+    yr : float
+        The floating year
+    hydro_year : bool
+        If the float year follows the  "hydrological year" convention or
+        not (default:True)
     """
 
+    cumsec = CUMSEC_IN_MONTHS_HYDRO if hydro_year else CUMSEC_IN_MONTHS
     try:
         sec, out_y = math.modf(yr)
         out_y = int(out_y)
         sec = round(sec * SEC_IN_YEAR)
-        out_m = np.nonzero(sec < CUMSEC_IN_MONTHS)[0][0] + 1
+        if sec == SEC_IN_YEAR:
+            # Floating errors
+            out_y += 1
+            sec = 0
+        out_m = np.nonzero(sec < cumsec)[0][0] + 1
     except TypeError:
         # TODO: inefficient but no time right now
         out_y = np.zeros(len(yr), np.int64)
         out_m = np.zeros(len(yr), np.int64)
         for i, y in enumerate(yr):
-            y, m = year_to_date(y)
+            y, m = floatyear_to_date(y, hydro_year=hydro_year)
             out_y[i] = y
             out_m[i] = m
     return out_y, out_m
 
 
-def date_to_year(y, m):
-    """Converts an integer (year, month) to a float year.
+def date_to_floatyear(y, m, hydro_year=True):
+    """Converts an integer (year, month) pair to a float year.
 
-    Note that this doesn't account for leap years.
+    Note that this doesn't account for leap years (365-day no leap calendar).
+    The default is to use the hydrological year convention, i.e. the first
+    month of the year is October. In practice, this makes a very small
+    difference: the intervals between months are not exactly the same if
+    you start with October or January.
+
+    Parameters
+    ----------
+    y : int
+        the year
+    m : int
+        the month
+    hydro_year : bool
+        If the float year follows the  "hydrological year" convention or
+        not (default:True)
     """
+
+    bsec = BEGINSEC_IN_MONTHS_HYDRO if hydro_year else BEGINSEC_IN_MONTHS
     ids = np.asarray(m, dtype=np.int) - 1
-    return y + BEGINSEC_IN_MONTHS[ids] / SEC_IN_YEAR
+    return y + bsec[ids] / SEC_IN_YEAR
 
 
-def monthly_timeseries(y0, y1=None, ny=None, include_last_year=False):
-    """Creates a monthly timeseries in units of floating years.
+def hydrodate_to_calendardate(y, m):
+    """Converts a hydrological (year, month) pair to a calendar date.
+
+    Parameters
+    ----------
+    y : int
+        the year
+    m : int
+        the month
+    """
+
+    try:
+        if m <= 3:
+            out_y = y - 1
+            out_m = m + 9
+        else:
+            out_y = y
+            out_m = m - 3
+    except (TypeError, ValueError):
+        # TODO: inefficient but no time right now
+        out_y = np.zeros(len(y), np.int64)
+        out_m = np.zeros(len(y), np.int64)
+        for i, (_y, _m) in enumerate(zip(y, m)):
+            _y, _m = hydrodate_to_calendardate(_y, _m)
+            out_y[i] = _y
+            out_m[i] = _m
+    return out_y, out_m
+
+
+def calendardate_to_hydrodate(y, m):
+    """Converts a calendar (year, month) pair to a hydrological date.
+
+    Parameters
+    ----------
+    y : int
+        the year
+    m : int
+        the month
+    """
+
+    try:
+        if m >= 10:
+            out_y = y + 1
+            out_m = m - 9
+        else:
+            out_y = y
+            out_m = m + 3
+    except (TypeError, ValueError):
+        # TODO: inefficient but no time right now
+        out_y = np.zeros(len(y), np.int64)
+        out_m = np.zeros(len(y), np.int64)
+        for i, (_y, _m) in enumerate(zip(y, m)):
+            _y, _m = calendardate_to_hydrodate(_y, _m)
+            out_y[i] = _y
+            out_m[i] = _m
+    return out_y, out_m
+
+
+def monthly_timeseries(y0, y1=None, ny=None, hydro_year=True,
+                       include_last_year=False):
+    """Creates a monthly timeseries in units of float years.
+
+    Parameters
+    ----------
+    hydro_year : bool
+        If the float year follows the  "hydrological year" convention or
+        not (default:True)
     """
 
     if y1 is not None:
@@ -1123,7 +1227,7 @@ def monthly_timeseries(y0, y1=None, ny=None, include_last_year=False):
         raise ValueError("Need at least two positional arguments.")
     months = np.tile(np.arange(12)+1, len(years))
     years = years.repeat(12)
-    out = date_to_year(years, months)
+    out = date_to_floatyear(years, months, hydro_year=hydro_year)
     if not include_last_year:
         out = out[:-11]
     return out
@@ -1169,7 +1273,9 @@ def pipe_log(gdir, task_func_name, err=None):
 
     # Defaults to working directory: it must be set!
     if not cfg.PATHS['working_dir']:
-        raise ValueError("Need a valid PATHS['working_dir']!")
+        warnings.warn("Cannot log to file without a valid "
+                      "cfg.PATHS['working_dir']!", RuntimeWarning)
+        return
 
     fpath = os.path.join(cfg.PATHS['working_dir'], 'log')
     mkdir(fpath)
@@ -1424,16 +1530,8 @@ def get_wgms_files(version=None):
     datadir = os.path.join(sdir, 'mbdata')
     assert os.path.exists(datadir)
 
-    if version in ['4', '5']:
-        outf = os.path.join(sdir, 'rgi_wgms_links_20170217_RGIV5.csv')
-        outf = pd.read_csv(outf, dtype={'RGI_REG': object})
-    elif version in ['6']:
-        outf = os.path.join(sdir, '00_rgi60_links.csv')
-        # Uniformize (ugly)
-        outf = pd.read_csv(outf, skiprows=[0, 1])
-        outf['RGI60_ID'] = outf['RGIId']
-        outf['WGMS_ID'] = outf['FoGId']
-        outf['RGI_REG'] = [s.split('-')[1].split('.')[0] for s in outf.RGIId]
+    outf = os.path.join(sdir, 'rgi_wgms_links_20171101.csv')
+    outf = pd.read_csv(outf, dtype={'RGI_REG': object})
 
     return outf, datadir
 
@@ -1514,7 +1612,7 @@ def _get_rgi_dir_unlocked(version=None):
     return rgi_dir
 
 
-def get_rgi_intersects_dir(reset=False):
+def get_rgi_intersects_dir(version=None, reset=False):
     """Returns a path to the RGI directory containing the intersects.
 
     If the files are not present, download them.
@@ -1525,12 +1623,14 @@ def get_rgi_intersects_dir(reset=False):
     """
 
     with _get_download_lock():
-        return _get_rgi_intersects_dir_unlocked(reset=reset)
+        return _get_rgi_intersects_dir_unlocked(version=version, reset=reset)
 
 
-def _get_rgi_intersects_dir_unlocked(reset=False):
+def _get_rgi_intersects_dir_unlocked(version=None, reset=False):
 
     rgi_dir = cfg.PATHS['rgi_dir']
+    if version is None:
+        version = cfg.PARAMS['rgi_version']
 
     # Be sure the user gave a sensible path to the RGI dir
     if not rgi_dir:
@@ -1540,9 +1640,13 @@ def _get_rgi_intersects_dir_unlocked(reset=False):
     rgi_dir = os.path.abspath(os.path.expanduser(rgi_dir))
     mkdir(rgi_dir, reset=reset)
 
-    dfile = ('https://www.dropbox.com/s/y73sdxygdiq7whv/' +
-             'RGI_V5_Intersects.zip?dl=1')
-    test_file = os.path.join(rgi_dir, 'RGI_V5_Intersects',
+    dfile = 'https://www.dropbox.com/s/'
+    if version == '5':
+        dfile += 'y73sdxygdiq7whv/RGI_V5_Intersects.zip?dl=1'
+    elif version == '6':
+        dfile += 'vawryxl8lkzxowu/RGI_V6_Intersects.zip?dl=1'
+
+    test_file = os.path.join(rgi_dir, 'RGI_V' + version + '_Intersects',
                              'Intersects_OGGM_Manifest.txt')
     if not os.path.exists(test_file):
         # if not there download it
@@ -1551,47 +1655,7 @@ def _get_rgi_intersects_dir_unlocked(reset=False):
         with zipfile.ZipFile(ofile) as zf:
             zf.extractall(rgi_dir)
 
-    return os.path.join(rgi_dir, 'RGI_V5_Intersects')
-
-
-def get_rgi_corrected_dir(reset=False):
-    """Returns a path to the RGI directory containing the new divided files.
-
-    If the files are not present, download them.
-
-    Returns
-    -------
-    path to the directory
-    """
-
-    with _get_download_lock():
-        return _get_rgi_corrected_dir_unlocked(reset=reset)
-
-
-def _get_rgi_corrected_dir_unlocked(reset=False):
-
-    rgi_dir = cfg.PATHS['rgi_dir']
-
-    # Be sure the user gave a sensible path to the RGI dir
-    if not rgi_dir:
-        raise ValueError('The RGI data directory has to be'
-                         'specified explicitly.')
-
-    rgi_dir = os.path.abspath(os.path.expanduser(rgi_dir))
-    mkdir(rgi_dir, reset=reset)
-
-    dfile = ('https://www.dropbox.com/s/85xdglv0zredue9/' +
-             'RGIV5_Corrected.zip?dl=1')
-    test_file = os.path.join(rgi_dir, 'RGIV5_Corrected',
-                             'RGIV5_Corrected_OGGM_Manifest.txt')
-    if not os.path.exists(test_file):
-        # if not there download it
-        ofile = file_downloader(dfile, reset=reset)
-        # Extract root
-        with zipfile.ZipFile(ofile) as zf:
-            zf.extractall(rgi_dir)
-
-    return os.path.join(rgi_dir, 'RGIV5_Corrected')
+    return os.path.join(rgi_dir, 'RGI_V' + version + '_Intersects')
 
 
 def get_cru_file(var=None):
@@ -1776,15 +1840,18 @@ def get_ref_mb_glaciers(gdirs):
 
 
 def compile_run_output(gdirs, path=True, monthly=False, filesuffix=''):
-    """Merge the runs output of the glacier directories into one file.
-
+    """Merge the output of the model runs of several gdirs into one file.
 
     Parameters
     ----------
-    gdirs: the list of GlacierDir to process.
-    path: where to store (default is on the working dir).
-    monthly: wether to store monthly values (default is yearly)
-    filesuffix: the filesuffix of the run
+    gdirs : []
+        the list of GlacierDir to process.
+    path : str
+        where to store (default is on the working dir).
+    monthly : bool
+        whether to store monthly values (default is yearly)
+    filesuffix : str
+        the filesuffix of the run
     """
 
     # Get the dimensions of all this
@@ -1799,27 +1866,54 @@ def compile_run_output(gdirs, path=True, monthly=False, filesuffix=''):
             ppath = gdirs[i].get_filepath('model_diagnostics',
                                           filesuffix=filesuffix)
             with xr.open_dataset(ppath) as ds_diag:
-                time = ds_diag.time.values
-                year = ds_diag.year.values
-                month = ds_diag.month.values
+                _ = ds_diag.time.values
             break
         except:
             i += 1
 
-    # Monthly or not
-    if monthly:
-        pkeep = np.ones(len(time), dtype=np.bool)
-    else:
-        pkeep = np.where(month == 1)
+    # OK found it, open it and prepare the output
 
-    time = time[pkeep]
-    year = year[pkeep]
-    month = month[pkeep]
-    ds = xr.Dataset(coords={'time': ('time', time),
-                            'year': ('time', year),
-                            'month': ('time', month),
-                            'rgi_id': ('rgi_id', rgi_ids)
-                            })
+    with xr.open_dataset(ppath) as ds_diag:
+        time = ds_diag.time.values
+        yrs = ds_diag.hydro_year.values
+        months = ds_diag.hydro_month.values
+        cyrs = ds_diag.calendar_year.values
+        cmonths = ds_diag.calendar_month.values
+
+        # Monthly or not
+        if monthly:
+            pkeep = np.ones(len(time), dtype=np.bool)
+        else:
+            pkeep = np.where(months == 1)
+        time = time[pkeep]
+        yrs = yrs[pkeep]
+        months = months[pkeep]
+        cyrs = cyrs[pkeep]
+        cmonths = cmonths[pkeep]
+
+        # Prepare output
+        ds = xr.Dataset()
+
+        # Global attributes
+        ds.attrs['description'] = 'OGGM model output'
+        ds.attrs['oggm_version'] = __version__
+        ds.attrs['calendar'] = '365-day no leap'
+        ds.attrs['creation_date'] = strftime("%Y-%m-%d %H:%M:%S", gmtime())
+
+        # Coordinates
+        ds.coords['time'] = ('time', time)
+        ds.coords['rgi_id'] = ('rgi_id', rgi_ids)
+        ds.coords['hydro_year'] = ('time', yrs)
+        ds.coords['hydro_month'] = ('time', months)
+        ds.coords['calendar_year'] = ('time', cyrs)
+        ds.coords['calendar_month'] = ('time', cmonths)
+        ds['time'].attrs['description'] = 'Floating hydrological year'
+        ds['rgi_id'].attrs['description'] = 'RGI glacier identifier'
+        ds['hydro_year'].attrs['description'] = 'Hydrological year'
+        ds['hydro_month'].attrs['description'] = 'Hydrological month'
+        ds['calendar_year'].attrs['description'] = 'Calendar year'
+        ds['calendar_month'].attrs['description'] = 'Calendar month'
+
     shape = (len(time), len(rgi_ids))
     vol = np.zeros(shape)
     area = np.zeros(shape)
@@ -1841,17 +1935,17 @@ def compile_run_output(gdirs, path=True, monthly=False, filesuffix=''):
             ela[:, i] = np.NaN
 
     ds['volume'] = (('time', 'rgi_id'), vol)
-    ds['volume'].attrs['units'] = 'm3'
     ds['volume'].attrs['description'] = 'Total glacier volume'
+    ds['volume'].attrs['units'] = 'm 3'
     ds['area'] = (('time', 'rgi_id'), area)
-    ds['area'].attrs['units'] = 'm2'
     ds['area'].attrs['description'] = 'Total glacier area'
+    ds['area'].attrs['units'] = 'm 2'
     ds['length'] = (('time', 'rgi_id'), length)
-    ds['length'].attrs['units'] = 'm'
     ds['length'].attrs['description'] = 'Glacier length'
+    ds['length'].attrs['units'] = 'm'
     ds['ela'] = (('time', 'rgi_id'), ela)
-    ds['ela'].attrs['units'] = 'm'
     ds['ela'].attrs['description'] = 'Glacier Equilibrium Line Altitude (ELA)'
+    ds['ela'].attrs['units'] = 'm a.s.l'
 
     if path:
         if path is True:
@@ -1861,14 +1955,177 @@ def compile_run_output(gdirs, path=True, monthly=False, filesuffix=''):
     return ds
 
 
-def glacier_characteristics(gdirs, filesuffix='', path=True):
+def compile_climate_input(gdirs, path=True, filename='climate_monthly',
+                          filesuffix=''):
+    """Merge the climate input files in the glacier directories into one file.
+
+    Parameters
+    ----------
+    gdirs : []
+        the list of GlacierDir to process.
+    path : str
+        where to store (default is on the working dir).
+    filename : str
+        BASENAME of the climate input files
+    filesuffix : str
+        the filesuffix of the compiled file
+    """
+
+    # Get the dimensions of all this
+    rgi_ids = [gd.rgi_id for gd in gdirs]
+
+    # The first gdir might have blown up, try some others
+    i = 0
+    while True:
+        if i >= len(gdirs):
+            raise RuntimeError('Found no valid glaciers!')
+        try:
+            ppath = gdirs[i].get_filepath(filename=filename,
+                                          filesuffix=filesuffix)
+            with warnings.catch_warnings():
+                # Long time series are currently a pain pandas
+                warnings.filterwarnings("ignore", message='Unable to decode')
+                with xr.open_dataset(ppath) as ds_clim:
+                    _ = ds_clim.time.values
+            break
+        except:
+            i += 1
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message='Unable to decode time axis')
+
+        with xr.open_dataset(ppath) as ds_clim:
+            try:
+                y0 = ds_clim.temp.time.values[0].astype('datetime64[Y]')
+                y1 = ds_clim.temp.time.values[-1].astype('datetime64[Y]')
+            except AttributeError:
+                y0 = ds_clim.temp.time.values[0].strftime('%Y')
+                y1 = ds_clim.temp.time.values[-1].strftime('%Y')
+
+    # We know the file is structured like this
+    ctime = pd.period_range('{}-10'.format(y0), '{}-9'.format(y1), freq='M')
+    cyrs = ctime.year
+    cmonths = ctime.month
+    yrs, months = calendardate_to_hydrodate(cyrs, cmonths)
+    time = date_to_floatyear(yrs, months)
+
+    # Prepare output
+    ds = xr.Dataset()
+
+    # Global attributes
+    ds.attrs['description'] = 'OGGM model output'
+    ds.attrs['oggm_version'] = __version__
+    ds.attrs['calendar'] = '365-day no leap'
+    ds.attrs['creation_date'] = strftime("%Y-%m-%d %H:%M:%S", gmtime())
+
+    # Coordinates
+    ds.coords['time'] = ('time', time)
+    ds.coords['rgi_id'] = ('rgi_id', rgi_ids)
+    ds.coords['hydro_year'] = ('time', yrs)
+    ds.coords['hydro_month'] = ('time', months)
+    ds.coords['calendar_year'] = ('time', cyrs)
+    ds.coords['calendar_month'] = ('time', cmonths)
+    ds['time'].attrs['description'] = 'Floating hydrological year'
+    ds['rgi_id'].attrs['description'] = 'RGI glacier identifier'
+    ds['hydro_year'].attrs['description'] = 'Hydrological year'
+    ds['hydro_month'].attrs['description'] = 'Hydrological month'
+    ds['calendar_year'].attrs['description'] = 'Calendar year'
+    ds['calendar_month'].attrs['description'] = 'Calendar month'
+
+    shape = (len(time), len(rgi_ids))
+    temp = np.zeros(shape) * np.NaN
+    prcp = np.zeros(shape) * np.NaN
+    grad = np.zeros(shape) * np.NaN
+    ref_hgt = np.zeros(len(rgi_ids)) * np.NaN
+    ref_pix_lon = np.zeros(len(rgi_ids)) * np.NaN
+    ref_pix_lat = np.zeros(len(rgi_ids)) * np.NaN
+
+    for i, gdir in enumerate(gdirs):
+        try:
+            ppath = gdir.get_filepath(filename=filename,
+                                      filesuffix=filesuffix)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message='Unable to decode')
+                with xr.open_dataset(ppath) as ds_clim:
+                    prcp[:, i] = ds_clim.prcp.values
+                    temp[:, i] = ds_clim.temp.values
+                    grad[:, i] = ds_clim.grad
+                    ref_hgt[i] = ds_clim.ref_hgt
+                    ref_pix_lon[i] = ds_clim.ref_pix_lon
+                    ref_pix_lat[i] = ds_clim.ref_pix_lat
+        except:
+            pass
+
+    ds['temp'] = (('time', 'rgi_id'), temp)
+    ds['temp'].attrs['units'] = 'DegC'
+    ds['temp'].attrs['description'] = '2m Temperature at height ref_hgt'
+    ds['prcp'] = (('time', 'rgi_id'), prcp)
+    ds['prcp'].attrs['units'] = 'kg m-2'
+    ds['prcp'].attrs['description'] = 'total monthly precipitation amount'
+    ds['grad'] = (('time', 'rgi_id'), grad)
+    ds['grad'].attrs['units'] = 'degC m-1'
+    ds['grad'].attrs['description'] = 'temperature gradient'
+    ds['ref_hgt'] = ('rgi_id', ref_hgt)
+    ds['ref_hgt'].attrs['units'] = 'm'
+    ds['ref_hgt'].attrs['description'] = 'reference height'
+    ds['ref_pix_lon'] = ('rgi_id', ref_pix_lon)
+    ds['ref_pix_lon'].attrs['description'] = 'longitude'
+    ds['ref_pix_lat'] = ('rgi_id', ref_pix_lat)
+    ds['ref_pix_lat'].attrs['description'] = 'latitude'
+
+    if path:
+        if path is True:
+            path = os.path.join(cfg.PATHS['working_dir'],
+                                'climate_input' + filesuffix + '.nc')
+        ds.to_netcdf(path)
+    return ds
+
+
+def compile_task_log(gdirs, task_names=[], filesuffix='', path=True):
+    """Gathers the log output for the selected task(s)
+    
+    Parameters
+    ----------
+    gdirs: the list of GlacierDir to process.
+    task_names : list of str
+        The tasks to check for
+    filesuffix : str
+        add suffix to output file
+    path:
+        Set to "True" in order  to store the info in the working directory
+        Set to a path to store the file to your chosen location
+    """
+
+    out_df = []
+    for gdir in gdirs:
+        d = OrderedDict()
+        d['rgi_id'] = gdir.rgi_id
+        for task_name in task_names:
+            ts = gdir.get_task_status(task_name)
+            if ts is None:
+                ts = ''
+            d[task_name] = ts.replace(',', ' ')
+        out_df.append(d)
+
+    out = pd.DataFrame(out_df).set_index('rgi_id')
+    if path:
+        if path is True:
+            out.to_csv(os.path.join(cfg.PATHS['working_dir'],
+                       'task_log'+filesuffix+'.csv'))
+        else:
+            out.to_csv(path)
+    return out
+
+
+def glacier_characteristics(gdirs, filesuffix='', path=True,
+                            inversion_only=False):
     """Gathers as many statistics as possible about a list of glacier
     directories.
-    
+
     It can be used to do result diagnostics and other stuffs. If the data
     necessary for a statistic is not available (e.g.: flowlines length) it
     will simply be ignored.
-    
+
     Parameters
     ----------
     gdirs: the list of GlacierDir to process.
@@ -1877,6 +2134,8 @@ def glacier_characteristics(gdirs, filesuffix='', path=True):
     path:
         Set to "True" in order  to store the info in the working directory
         Set to a path to store the file to your chosen location
+    inversion_only: bool
+        if one wants to summarize the inversion output only
     """
 
     out_df = []
@@ -1896,7 +2155,7 @@ def glacier_characteristics(gdirs, filesuffix='', path=True):
         # The rest is less certain. We put this in a try block and see
         try:
             # Masks related stuff
-            if gdir.has_file('gridded_data'):
+            if gdir.has_file('gridded_data') and not inversion_only:
                 fpath = gdir.get_filepath('gridded_data')
                 with netCDF4.Dataset(fpath) as nc:
                     mask = nc.variables['glacier_mask'][:]
@@ -1906,7 +2165,7 @@ def glacier_characteristics(gdirs, filesuffix='', path=True):
                 d['dem_min_elev'] = np.min(topo[np.where(mask == 1)])
 
             # Centerlines
-            if gdir.has_file('centerlines'):
+            if gdir.has_file('centerlines') and not inversion_only:
                 cls = gdir.read_pickle('centerlines')
                 longuest = 0.
                 for cl in cls:
@@ -1915,7 +2174,7 @@ def glacier_characteristics(gdirs, filesuffix='', path=True):
                 d['longuest_centerline_km'] = longuest * gdir.grid.dx / 1000.
 
             # MB and flowline related stuff
-            if gdir.has_file('inversion_flowlines'):
+            if gdir.has_file('inversion_flowlines') and not inversion_only:
                 amb = np.array([])
                 h = np.array([])
                 widths = np.array([])
@@ -1943,8 +2202,16 @@ def glacier_characteristics(gdirs, filesuffix='', path=True):
                 d['avg_width'] = np.mean(widths)
                 d['avg_slope'] = np.mean(slope)
 
+            # MB calib
+            if gdir.has_file('local_mustar') and not inversion_only:
+                df = pd.read_csv(gdir.get_filepath('local_mustar')).iloc[0]
+                d['t_star'] = df['t_star']
+                d['prcp_fac'] = df['prcp_fac']
+                d['mu_star'] = df['mu_star']
+                d['mb_bias'] = df['bias']
+
             # Climate
-            if gdir.has_file('climate_monthly'):
+            if gdir.has_file('climate_monthly') and not inversion_only:
                 cf = gdir.get_filepath('climate_monthly')
                 with xr.open_dataset(cf) as cds:
                     d['clim_alt'] = cds.ref_hgt
@@ -1970,7 +2237,7 @@ def glacier_characteristics(gdirs, filesuffix='', path=True):
                 d['vas_thickness_m'] = d['vas_volume_km3'] / area * 1000
 
             # Calving
-            if gdir.has_file('calving_output'):
+            if gdir.has_file('calving_output') and not inversion_only:
                 all_calving_data = []
                 all_width = []
                 cl = gdir.read_pickle('calving_output')
@@ -2048,32 +2315,34 @@ class entity_task(object):
             if reset is None:
                 reset = not cfg.PARAMS['auto_skip_task']
 
+            task_name = task_func.__name__
+
+            # Filesuffix are typically used to differentiate tasks
+            fsuffix = kwargs.get('filesuffix', False)
+            if fsuffix:
+                task_name += fsuffix
+
             # Do we need to run this task?
-            s = gdir.get_task_status(task_func)
+            s = gdir.get_task_status(task_name)
             if not reset and s and ('SUCCESS' in s):
                 return
 
             # Log what we are doing
             if print_log:
-                self.log.info('(%s) %s', gdir.rgi_id, task_func.__name__)
+                self.log.info('(%s) %s', gdir.rgi_id, task_name)
 
             # Run the task
             try:
                 out = task_func(gdir, **kwargs)
-                gdir.log(task_func)
+                gdir.log(task_name)
             except Exception as err:
                 # Something happened
                 out = None
-                gdir.log(task_func, err=err)
-                task_func_name = task_func.__name__
-                # Filesuffix are typically used to differenciate tasks
-                fsuffix = kwargs.get('filesuffix', False)
-                if fsuffix:
-                    task_func_name += fsuffix
-                pipe_log(gdir, task_func_name, err=err)
+                gdir.log(task_name, err=err)
+                pipe_log(gdir, task_name, err=err)
                 if print_log:
                     self.log.error('%s occurred during task %s on %s!',
-                                   type(err).__name__, task_func.__name__,
+                                   type(err).__name__, task_name,
                                    gdir.rgi_id)
                 if not cfg.PARAMS['continue_on_error']:
                     raise
@@ -2332,8 +2601,9 @@ class GlacierDirectory(object):
             of the times)
         setup : str
             set up you want the copied directory to be useful for. Currently
-            supported are 'all' (copy the entire directory) and 'run' (copy)
-            the necessary files for a dynamical run).
+            supported are 'all' (copy the entire directory), 'inversion'
+            (copy the necessary files for the inversion AND the run)
+            and 'run' (copy the necessary files for a dynamical run).
         """
 
         base_dir = os.path.abspath(base_dir)
@@ -2341,7 +2611,14 @@ class GlacierDirectory(object):
                                self.rgi_id)
         if setup == 'run':
             paths = ['model_flowlines', 'inversion_params',
-                     'local_mustar', 'climate_monthly']
+                     'local_mustar', 'climate_monthly', 'gridded_data']
+            paths = ('*' + p + '*' for p in paths)
+            shutil.copytree(self.dir, new_dir,
+                            ignore=include_patterns(*paths))
+        elif setup == 'inversion':
+            paths = ['inversion_params', 'downstream_line',
+                     'inversion_flowlines', 'glacier_grid',
+                     'local_mustar', 'climate_monthly', 'gridded_data']
             paths = ('*' + p + '*' for p in paths)
             shutil.copytree(self.dir, new_dir,
                             ignore=include_patterns(*paths))
@@ -2392,7 +2669,7 @@ class GlacierDirectory(object):
 
         return os.path.exists(self.get_filepath(filename))
 
-    def read_pickle(self, filename, use_compression=None):
+    def read_pickle(self, filename, use_compression=None, filesuffix=''):
         """Reads a pickle located in the directory.
 
         Parameters
@@ -2402,6 +2679,9 @@ class GlacierDirectory(object):
         use_compression : bool
             whether or not the file ws compressed. Default is to use
             cfg.PARAMS['use_compression'] for this (recommended)
+        filesuffix : str
+            append a suffix to the filename (useful for experiments).
+
         Returns
         -------
         An object read from the pickle
@@ -2409,12 +2689,14 @@ class GlacierDirectory(object):
         use_comp = (use_compression if use_compression is not None
                     else cfg.PARAMS['use_compression'])
         _open = gzip.open if use_comp else open
-        with _open(self.get_filepath(filename), 'rb') as f:
+        fp = self.get_filepath(filename, filesuffix=filesuffix)
+        with _open(fp, 'rb') as f:
             out = pickle.load(f)
 
         return out
 
-    def write_pickle(self, var, filename, use_compression=None):
+    def write_pickle(self, var, filename, use_compression=None,
+                     filesuffix=''):
         """ Writes a variable to a pickle on disk.
 
         Parameters
@@ -2426,11 +2708,14 @@ class GlacierDirectory(object):
         use_compression : bool
             whether or not the file ws compressed. Default is to use
             cfg.PARAMS['use_compression'] for this (recommended)
+        filesuffix : str
+            append a suffix to the filename (useful for experiments).
         """
         use_comp = (use_compression if use_compression is not None
                     else cfg.PARAMS['use_compression'])
         _open = gzip.open if use_comp else open
-        with _open(self.get_filepath(filename), 'wb') as f:
+        fp = self.get_filepath(filename, filesuffix=filesuffix)
+        with _open(fp, 'wb') as f:
             pickle.dump(var, f, protocol=-1)
 
     def create_gridded_ncdf_file(self, fname):
@@ -2612,7 +2897,7 @@ class GlacierDirectory(object):
             df.name = ds.glacier_name
         return df
 
-    def log(self, func, err=None):
+    def log(self, task_name, err=None):
         """Logs a message to the glacier directory.
 
         It is usually called by the :py:class:`entity_task` decorator, normally
@@ -2629,7 +2914,7 @@ class GlacierDirectory(object):
 
         # a line per function call
         nowsrt = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
-        line = nowsrt + ';' + func.__name__ + ';'
+        line = nowsrt + ';' + task_name + ';'
         if err is None:
             line += 'SUCCESS'
         else:
@@ -2637,7 +2922,7 @@ class GlacierDirectory(object):
         with open(self.logfile, 'a') as logfile:
             logfile.write(line + '\n')
 
-    def get_task_status(self, func):
+    def get_task_status(self, task_name):
         """Opens this directory's log file to see if a task was already run.
 
         It is usually called by the :py:class:`entity_task` decorator, normally
@@ -2645,8 +2930,8 @@ class GlacierDirectory(object):
 
         Parameters
         ----------
-        func : a function
-            the tasks which wants to know
+        task_name : str
+            the name of the task which has to be tested for
 
         Returns
         -------
@@ -2660,7 +2945,7 @@ class GlacierDirectory(object):
         with open(self.logfile) as logfile:
             lines = logfile.readlines()
 
-        lines = [l.replace('\n', '') for l in lines if func.__name__ in l]
+        lines = [l.replace('\n', '') for l in lines if task_name in l]
         if lines:
             # keep only the last log
             return lines[-1].split(';')[-1]

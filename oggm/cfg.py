@@ -30,6 +30,9 @@ if not os.path.exists(CACHE_DIR):
 # Path to the config file
 CONFIG_FILE = os.path.join(os.path.expanduser('~'), '.oggm_config')
 
+# config was changed, indicates that multiprocessing needs a reset
+CONFIG_MODIFIED = False
+
 
 class DocumentedDict(dict):
     """Quick "magic" to document the BASENAMES entries."""
@@ -45,8 +48,10 @@ class DocumentedDict(dict):
 
     def __setitem__(self, key, value):
         # Overrides the original dic to separate value and documentation
+        global CONFIG_MODIFIED
         try:
             self._set_key(key, value[0], docstr=value[1])
+            CONFIG_MODIFIED = True
         except:
             raise ValueError('DocumentedDict accepts only tuple of len 2')
 
@@ -60,19 +65,28 @@ class DocumentedDict(dict):
                self._doc[key]
 
 
-class PathOrderedDict(OrderedDict):
+class ResettingOrderedDict(OrderedDict):
+    """OrderedDict wrapper that resets our multiprocessing on set"""
+
+    def __setitem__(self, key, value):
+        global CONFIG_MODIFIED
+        OrderedDict.__setitem__(self, key, value)
+        CONFIG_MODIFIED = True
+
+
+class PathOrderedDict(ResettingOrderedDict):
     """Quick "magic" to be sure that paths are expanded correctly."""
 
     def __setitem__(self, key, value):
         # Overrides the original dic to expand the path
-        OrderedDict.__setitem__(self, key, os.path.expanduser(value))
+        ResettingOrderedDict.__setitem__(self, key, os.path.expanduser(value))
 
 # Globals
 IS_INITIALIZED = False
-PARAMS = OrderedDict()
+PARAMS = ResettingOrderedDict()
 PATHS = PathOrderedDict()
 BASENAMES = DocumentedDict()
-LRUHANDLERS = OrderedDict()
+LRUHANDLERS = ResettingOrderedDict()
 
 # Constants
 SEC_IN_YEAR = 365*24*3600
@@ -81,8 +95,11 @@ SEC_IN_HOUR = 3600
 DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 DAYS_IN_MONTH_HYDRO = [31, 30, 31, 31, 28, 31, 30, 31, 30, 31, 31, 30]
 SEC_IN_MONTHS = [d * SEC_IN_DAY for d in DAYS_IN_MONTH]
+SEC_IN_MONTHS_HYDRO = [d * SEC_IN_DAY for d in DAYS_IN_MONTH_HYDRO]
 CUMSEC_IN_MONTHS = np.cumsum(SEC_IN_MONTHS)
+CUMSEC_IN_MONTHS_HYDRO = np.cumsum(SEC_IN_MONTHS_HYDRO)
 BEGINSEC_IN_MONTHS = np.insert(CUMSEC_IN_MONTHS[:-1], [0], 0)
+BEGINSEC_IN_MONTHS_HYDRO = np.insert(CUMSEC_IN_MONTHS_HYDRO[:-1], [0], 0)
 
 RHO = 900.  # ice density
 G = 9.81  # gravity
