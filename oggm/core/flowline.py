@@ -73,6 +73,10 @@ class Flowline(Centerline):
     def surface_h(self):
         return self._thick + self.bed_h
 
+    @surface_h.setter
+    def surface_h(self, value):
+        self.thick = value - self.bed_h
+
     @property
     def length_m(self):
         # We define the length a bit differently: but more robust
@@ -531,7 +535,7 @@ class FlowlineModel(object):
             heights = self._mb_current_heights[fl_id]
 
         date = utils.floatyear_to_date(year)
-        if self.mb_elev_feedback == 'annual':
+        if self.mb_elev_feedback in ['annual', 'never']:
             # ignore month changes
             date = (date[0], date[0])
 
@@ -763,11 +767,11 @@ class FluxBasedModel(FlowlineModel):
             max_dt = 10*SEC_IN_DAY
         elif time_stepping == 'conservative':
             cfl_number = 0.01
-            min_dt = 1*SEC_IN_HOUR
+            min_dt = SEC_IN_HOUR
             max_dt = 5*SEC_IN_DAY
         elif time_stepping == 'ultra-conservative':
             cfl_number = 0.01
-            min_dt = 0.5*SEC_IN_HOUR
+            min_dt = SEC_IN_HOUR / 10
             max_dt = 5*SEC_IN_DAY
         else:
             if time_stepping != 'user':
@@ -1627,11 +1631,13 @@ def _run_with_numerical_tests(gdir, filesuffix, mb, ys, ye, kwargs,
     for step in steps:
         log.info('(%s) trying %s time stepping scheme.', gdir.rgi_id, step)
         if model_fls is None:
-            model_fls = gdir.read_pickle('model_flowlines')
+            fls = gdir.read_pickle('model_flowlines')
+        else:
+            fls = model_fls
         if zero_initial_glacier:
-            for fl in model_fls:
+            for fl in fls:
                 fl.thick = fl.thick * 0.
-        model = FluxBasedModel(model_fls, mb_model=mb, y0=ys,
+        model = FluxBasedModel(fls, mb_model=mb, y0=ys,
                                time_stepping=step,
                                is_tidewater=gdir.is_tidewater,
                                **kwargs)

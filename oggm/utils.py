@@ -16,14 +16,13 @@ import warnings
 from collections import OrderedDict
 from functools import partial, wraps
 from time import gmtime, strftime
-import json
 import time
 import fnmatch
 import platform
 import struct
 import importlib
-from urllib.request import urlretrieve, urlopen
-from urllib.error import HTTPError, URLError, ContentTooShortError
+from urllib.request import urlretrieve
+from urllib.error import HTTPError, ContentTooShortError
 from urllib.parse import urlparse
 
 # External libs
@@ -53,8 +52,7 @@ import multiprocessing as mp
 # Locals
 from oggm import __version__
 import oggm.cfg as cfg
-from oggm.cfg import (SEC_IN_YEAR, CUMSEC_IN_MONTHS, BEGINSEC_IN_MONTHS,
-                      CUMSEC_IN_MONTHS_HYDRO, BEGINSEC_IN_MONTHS_HYDRO)
+from oggm.cfg import SEC_IN_YEAR, SEC_IN_MONTH
 
 # Module logger
 logger = logging.getLogger(__name__)
@@ -62,7 +60,7 @@ logger = logging.getLogger(__name__)
 # Github repository and commit hash/branch name/tag name on that repository
 # The given commit will be downloaded from github and used as source for all sample data
 SAMPLE_DATA_GH_REPO = 'OGGM/oggm-sample-data'
-SAMPLE_DATA_COMMIT = 'a4312aff1b028445aead6c43c2c96886ed8cfaf9'
+SAMPLE_DATA_COMMIT = '22da1500d1d602b7ab7c80519c7caf61fb03766e'
 
 CRU_SERVER = ('https://crudata.uea.ac.uk/cru/data/hrg/cru_ts_4.01/cruts'
               '.1709081022.v4.01/')
@@ -942,7 +940,9 @@ def line_interpol(line, dx):
                     opbs.extend([shpg.Point(c) for c in p.coords])
             pbs = opbs
         else:
-            assert pbs.type == 'MultiPoint'
+            if pbs.type != 'MultiPoint':
+                raise RuntimeError('line_interpol: we expect a MultiPoint'
+                                    'but got a {}.'.format(pbs.type))
 
         # Out of the point(s) that we get, take the one farthest from the top
         refdis = line.project(pref)
@@ -1078,7 +1078,10 @@ def polygon_intersections(gdf):
             if isinstance(mult_intersect, shpg.linestring.LineString):
                 mult_intersect = [mult_intersect]
             for line in mult_intersect:
-                assert isinstance(line, shpg.linestring.LineString)
+                if not isinstance(line, shpg.linestring.LineString):
+                    raise RuntimeError('polygon_intersections: we expect'
+                                       'a LineString but got a '
+                                       '{}.'.format(line.type))
                 line = gpd.GeoDataFrame([[i, j, line]],
                                         columns=out_cols)
                 out = out.append(line)
@@ -1086,25 +1089,18 @@ def polygon_intersections(gdf):
     return out
 
 
-def floatyear_to_date(yr, hydro_year=True):
+def floatyear_to_date(yr):
     """Converts a float year to an actual (year, month) pair.
 
-    Note that this doesn't account for leap years (365-day no leap calendar).
-    The default is to use the hydrological year convention, i.e. the first
-    month of the year is October. In practice, this makes a very small
-    difference: the intervals between months are not exactly the same if
-    you start with October or January.
+    Note that this doesn't account for leap years (365-day no leap calendar),
+    and that the months all have the same length.
 
     Parameters
     ----------
     yr : float
         The floating year
-    hydro_year : bool
-        If the float year follows the  "hydrological year" convention or
-        not (default:True)
     """
 
-    cumsec = CUMSEC_IN_MONTHS_HYDRO if hydro_year else CUMSEC_IN_MONTHS
     try:
         sec, out_y = math.modf(yr)
         out_y = int(out_y)
@@ -1113,26 +1109,23 @@ def floatyear_to_date(yr, hydro_year=True):
             # Floating errors
             out_y += 1
             sec = 0
-        out_m = np.nonzero(sec < cumsec)[0][0] + 1
+        out_m = int(sec / SEC_IN_MONTH) + 1
     except TypeError:
         # TODO: inefficient but no time right now
         out_y = np.zeros(len(yr), np.int64)
         out_m = np.zeros(len(yr), np.int64)
         for i, y in enumerate(yr):
-            y, m = floatyear_to_date(y, hydro_year=hydro_year)
+            y, m = floatyear_to_date(y)
             out_y[i] = y
             out_m[i] = m
     return out_y, out_m
 
 
-def date_to_floatyear(y, m, hydro_year=True):
+def date_to_floatyear(y, m):
     """Converts an integer (year, month) pair to a float year.
 
-    Note that this doesn't account for leap years (365-day no leap calendar).
-    The default is to use the hydrological year convention, i.e. the first
-    month of the year is October. In practice, this makes a very small
-    difference: the intervals between months are not exactly the same if
-    you start with October or January.
+    Note that this doesn't account for leap years (365-day no leap calendar),
+    and that the months all have the same length.
 
     Parameters
     ----------
@@ -1140,17 +1133,12 @@ def date_to_floatyear(y, m, hydro_year=True):
         the year
     m : int
         the month
-    hydro_year : bool
-        If the float year follows the  "hydrological year" convention or
-        not (default:True)
     """
 
-    bsec = BEGINSEC_IN_MONTHS_HYDRO if hydro_year else BEGINSEC_IN_MONTHS
-    ids = np.asarray(m, dtype=np.int) - 1
-    return y + bsec[ids] / SEC_IN_YEAR
+    return np.asanyarray(y) + (np.asanyarray(m)-1) * SEC_IN_MONTH / SEC_IN_YEAR
 
 
-def hydrodate_to_calendardate(y, m):
+def hydrodate_to_calendardate(y, m, start_month=10):
     """Converts a hydrological (year, month) pair to a calendar date.
 
     Parameters
@@ -1159,27 +1147,30 @@ def hydrodate_to_calendardate(y, m):
         the year
     m : int
         the month
+    start_month : int
+        the first month of the hydrological year
     """
 
+    e = 13 - start_month
     try:
-        if m <= 3:
+        if m <= e:
             out_y = y - 1
-            out_m = m + 9
+            out_m = m + start_month - 1
         else:
             out_y = y
-            out_m = m - 3
+            out_m = m - e
     except (TypeError, ValueError):
         # TODO: inefficient but no time right now
         out_y = np.zeros(len(y), np.int64)
         out_m = np.zeros(len(y), np.int64)
         for i, (_y, _m) in enumerate(zip(y, m)):
-            _y, _m = hydrodate_to_calendardate(_y, _m)
+            _y, _m = hydrodate_to_calendardate(_y, _m, start_month=start_month)
             out_y[i] = _y
             out_m[i] = _m
     return out_y, out_m
 
 
-def calendardate_to_hydrodate(y, m):
+def calendardate_to_hydrodate(y, m, start_month=10):
     """Converts a calendar (year, month) pair to a hydrological date.
 
     Parameters
@@ -1188,35 +1179,33 @@ def calendardate_to_hydrodate(y, m):
         the year
     m : int
         the month
+    start_month : int
+        the first month of the hydrological year
     """
 
     try:
-        if m >= 10:
+        if m >= start_month:
             out_y = y + 1
-            out_m = m - 9
+            out_m = m - start_month + 1
         else:
             out_y = y
-            out_m = m + 3
+            out_m = m + 13 - start_month
     except (TypeError, ValueError):
         # TODO: inefficient but no time right now
         out_y = np.zeros(len(y), np.int64)
         out_m = np.zeros(len(y), np.int64)
         for i, (_y, _m) in enumerate(zip(y, m)):
-            _y, _m = calendardate_to_hydrodate(_y, _m)
+            _y, _m = calendardate_to_hydrodate(_y, _m, start_month=start_month)
             out_y[i] = _y
             out_m[i] = _m
     return out_y, out_m
 
 
-def monthly_timeseries(y0, y1=None, ny=None, hydro_year=True,
-                       include_last_year=False):
+def monthly_timeseries(y0, y1=None, ny=None, include_last_year=False):
     """Creates a monthly timeseries in units of float years.
 
     Parameters
     ----------
-    hydro_year : bool
-        If the float year follows the  "hydrological year" convention or
-        not (default:True)
     """
 
     if y1 is not None:
@@ -1227,7 +1216,7 @@ def monthly_timeseries(y0, y1=None, ny=None, hydro_year=True,
         raise ValueError("Need at least two positional arguments.")
     months = np.tile(np.arange(12)+1, len(years))
     years = years.repeat(12)
-    out = date_to_floatyear(years, months, hydro_year=hydro_year)
+    out = date_to_floatyear(years, months)
     if not include_last_year:
         out = out[:-11]
     return out
@@ -1559,7 +1548,10 @@ def get_rgi_dir(version=None):
 
     Parameters
     ----------
-    version: '5', '6', None being the one specified in params
+    region: str
+        from '01' to '19'
+    version: str
+        '5', '6', defaults to None (linking to the one specified in cfg.params)
 
     Returns
     -------
@@ -1610,6 +1602,29 @@ def _get_rgi_dir_unlocked(version=None):
                 # delete the zipfile after success
                 os.remove(zfile)
     return rgi_dir
+
+
+def get_rgi_region_file(region, version=None):
+    """Returns a path to a RGI region file.
+
+    If the RGI files are not present, download them.
+
+    Parameters
+    ----------
+    region: str
+        from '01' to '19'
+    version: str
+        '5', '6', defaults to None (linking to the one specified in cfg.params)
+
+    Returns
+    -------
+    path to the RGI shapefile
+    """
+
+    rgi_dir = get_rgi_dir(version=version)
+    f = list(glob.glob(rgi_dir + "/{}_*/{}_*.shp".format(region, region)))
+    assert len(f) == 1
+    return f[0]
 
 
 def get_rgi_intersects_dir(version=None, reset=False):
@@ -2081,7 +2096,8 @@ def compile_climate_input(gdirs, path=True, filename='climate_monthly',
     return ds
 
 
-def compile_task_log(gdirs, task_names=[], filesuffix='', path=True):
+def compile_task_log(gdirs, task_names=[], filesuffix='', path=True,
+                     append=True):
     """Gathers the log output for the selected task(s)
     
     Parameters
@@ -2094,6 +2110,9 @@ def compile_task_log(gdirs, task_names=[], filesuffix='', path=True):
     path:
         Set to "True" in order  to store the info in the working directory
         Set to a path to store the file to your chosen location
+    append:
+        If a task log file already exists in the working directory, the new
+        logs will be added to the existing file
     """
 
     out_df = []
@@ -2110,10 +2129,12 @@ def compile_task_log(gdirs, task_names=[], filesuffix='', path=True):
     out = pd.DataFrame(out_df).set_index('rgi_id')
     if path:
         if path is True:
-            out.to_csv(os.path.join(cfg.PATHS['working_dir'],
-                       'task_log'+filesuffix+'.csv'))
-        else:
-            out.to_csv(path)
+            path = os.path.join(cfg.PATHS['working_dir'],
+                                'task_log'+filesuffix+'.csv')
+        if os.path.exists(path) and append:
+            odf = pd.read_csv(path, index_col=0)
+            out = odf.join(out, rsuffix='_n')
+        out.to_csv(path)
     return out
 
 
@@ -2137,6 +2158,7 @@ def glacier_characteristics(gdirs, filesuffix='', path=True,
     inversion_only: bool
         if one wants to summarize the inversion output only
     """
+    from oggm.core.massbalance import ConstantMassBalance
 
     out_df = []
     for gdir in gdirs:
@@ -2152,78 +2174,9 @@ def glacier_characteristics(gdirs, filesuffix='', path=True,
         d['glacier_type'] = gdir.glacier_type
         d['terminus_type'] = gdir.terminus_type
 
-        # The rest is less certain. We put this in a try block and see
+        # The rest is less certain. We put these in a try block and see
+        # We're good with any error - we store the dict anyway below
         try:
-            # Masks related stuff
-            if gdir.has_file('gridded_data') and not inversion_only:
-                fpath = gdir.get_filepath('gridded_data')
-                with netCDF4.Dataset(fpath) as nc:
-                    mask = nc.variables['glacier_mask'][:]
-                    topo = nc.variables['topo'][:]
-                d['dem_mean_elev'] = np.mean(topo[np.where(mask == 1)])
-                d['dem_max_elev'] = np.max(topo[np.where(mask == 1)])
-                d['dem_min_elev'] = np.min(topo[np.where(mask == 1)])
-
-            # Centerlines
-            if gdir.has_file('centerlines') and not inversion_only:
-                cls = gdir.read_pickle('centerlines')
-                longuest = 0.
-                for cl in cls:
-                    longuest = np.max([longuest, cl.dis_on_line[-1]])
-                d['n_centerlines'] = len(cls)
-                d['longuest_centerline_km'] = longuest * gdir.grid.dx / 1000.
-
-            # MB and flowline related stuff
-            if gdir.has_file('inversion_flowlines') and not inversion_only:
-                amb = np.array([])
-                h = np.array([])
-                widths = np.array([])
-                slope = np.array([])
-                fls = gdir.read_pickle('inversion_flowlines')
-                dx = fls[0].dx * gdir.grid.dx
-                for fl in fls:
-                    amb = np.append(amb, fl.apparent_mb)
-                    hgt = fl.surface_h
-                    h = np.append(h, hgt)
-                    widths = np.append(widths, fl.widths * dx)
-                    slope = np.append(slope,
-                                      np.arctan(-np.gradient(hgt, dx)))
-
-                pacc = np.where(amb >= 0)
-                pab = np.where(amb < 0)
-                d['aar'] = np.sum(widths[pacc]) / np.sum(widths[pab])
-                try:
-                    # Try to get the slope
-                    mb_slope, _, _, _, _ = stats.linregress(h[pab], amb[pab])
-                    d['mb_grad'] = mb_slope
-                except:
-                    # we don't mind if something goes wrong
-                    d['mb_grad'] = np.NaN
-                d['avg_width'] = np.mean(widths)
-                d['avg_slope'] = np.mean(slope)
-
-            # MB calib
-            if gdir.has_file('local_mustar') and not inversion_only:
-                df = pd.read_csv(gdir.get_filepath('local_mustar')).iloc[0]
-                d['t_star'] = df['t_star']
-                d['prcp_fac'] = df['prcp_fac']
-                d['mu_star'] = df['mu_star']
-                d['mb_bias'] = df['bias']
-
-            # Climate
-            if gdir.has_file('climate_monthly') and not inversion_only:
-                cf = gdir.get_filepath('climate_monthly')
-                with xr.open_dataset(cf) as cds:
-                    d['clim_alt'] = cds.ref_hgt
-                    t = cds.temp.mean(dim='time').values
-                    if 'dem_mean_elev' in d:
-                        t = (t - (d['dem_mean_elev'] - d['clim_alt']) *
-                             cfg.PARAMS['temp_default_gradient'])
-                    else:
-                        t = np.NaN
-                    d['clim_temp_avgh'] = t
-                    d['clim_prcp'] = cds.prcp.mean(dim='time').values * 12
-
             # Inversion
             if gdir.has_file('inversion_output'):
                 vol = []
@@ -2235,22 +2188,100 @@ def glacier_characteristics(gdirs, filesuffix='', path=True,
                 d['inv_thickness_m'] = d['inv_volume_km3'] / area * 1000
                 d['vas_volume_km3'] = 0.034*(area**1.375)
                 d['vas_thickness_m'] = d['vas_volume_km3'] / area * 1000
-
-            # Calving
-            if gdir.has_file('calving_output') and not inversion_only:
-                all_calving_data = []
-                all_width = []
-                cl = gdir.read_pickle('calving_output')
-                for c in cl:
-                    all_calving_data = c['calving_fluxes'][-1]
-                    all_width = c['t_width']
-                d['calving_flux'] = all_calving_data
-                d['calving_front_width'] = all_width
-            else:
-                d['calving_flux'] = np.NaN
-                d['calving_front_width'] = np.NaN
         except:
-            # We're good with any error - we store the dict anyway below
+            pass
+        if inversion_only:
+            out_df.append(d)
+            continue
+        try:
+            # Masks related stuff
+            fpath = gdir.get_filepath('gridded_data')
+            with netCDF4.Dataset(fpath) as nc:
+                mask = nc.variables['glacier_mask'][:]
+                topo = nc.variables['topo'][:]
+            d['dem_mean_elev'] = np.mean(topo[np.where(mask == 1)])
+            d['dem_max_elev'] = np.max(topo[np.where(mask == 1)])
+            d['dem_min_elev'] = np.min(topo[np.where(mask == 1)])
+        except:
+            pass
+        try:
+            # Centerlines
+            cls = gdir.read_pickle('centerlines')
+            longuest = 0.
+            for cl in cls:
+                longuest = np.max([longuest, cl.dis_on_line[-1]])
+            d['n_centerlines'] = len(cls)
+            d['longuest_centerline_km'] = longuest * gdir.grid.dx / 1000.
+        except:
+            pass
+        try:
+            # Flowline related stuff
+            h = np.array([])
+            widths = np.array([])
+            slope = np.array([])
+            fls = gdir.read_pickle('inversion_flowlines')
+            dx = fls[0].dx * gdir.grid.dx
+            for fl in fls:
+                hgt = fl.surface_h
+                h = np.append(h, hgt)
+                widths = np.append(widths, fl.widths * dx)
+                slope = np.append(slope, np.arctan(-np.gradient(hgt, dx)))
+            d['flowline_mean_elev'] = np.average(h, weights=widths)
+            d['flowline_max_elev'] = np.max(h)
+            d['flowline_min_elev'] = np.min(h)
+            d['flowline_avg_width'] = np.mean(widths)
+            d['flowline_avg_slope'] = np.mean(slope)
+        except:
+            pass
+        try:
+            # MB calib
+            df = pd.read_csv(gdir.get_filepath('local_mustar')).iloc[0]
+            d['t_star'] = df['t_star']
+            d['prcp_fac'] = df['prcp_fac']
+            d['mu_star'] = df['mu_star']
+            d['mb_bias'] = df['bias']
+        except:
+            pass
+        try:
+            # Climate and MB at t*
+            h, w = gdir.get_inversion_flowline_hw()
+            mbmod = ConstantMassBalance(gdir, bias=0)
+            mbh = mbmod.get_annual_mb(h, w) * SEC_IN_YEAR * cfg.RHO
+            pacc = np.where(mbh >= 0)
+            pab = np.where(mbh < 0)
+            d['tstar_aar'] = np.sum(w[pacc]) / np.sum(w[pab])
+            try:
+                # Try to get the slope
+                mb_slope, _, _, _, _ = stats.linregress(h[pab], mbh[pab])
+                d['tstar_mb_grad'] = mb_slope
+            except:
+                # we don't mind if something goes wrong
+                d['tstar_mb_grad'] = np.NaN
+            d['tstar_ela_h'] = mbmod.get_ela()
+            # Climate
+            t, _, p, ps = mbmod.get_climate([d['tstar_ela_h'],
+                                             d['flowline_mean_elev'],
+                                             d['flowline_max_elev'],
+                                             d['flowline_min_elev']])
+            for n, v in zip(['temp', 'prcpsol'], [t, ps]):
+                d['tstar_avg_' + n + '_ela_h'] = v[0]
+                d['tstar_avg_' + n + '_mean_elev'] = v[1]
+                d['tstar_avg_' + n + '_max_elev'] = v[2]
+                d['tstar_avg_' + n + '_min_elev'] = v[3]
+            d['tstar_avg_prcp'] = p[0]
+        except:
+            pass
+        try:
+            # Calving
+            all_calving_data = []
+            all_width = []
+            cl = gdir.read_pickle('calving_output')
+            for c in cl:
+                all_calving_data = c['calving_fluxes'][-1]
+                all_width = c['t_width']
+            d['calving_flux'] = all_calving_data
+            d['calving_front_width'] = all_width
+        except:
             pass
 
         out_df.append(d)
@@ -2535,6 +2566,9 @@ class GlacierDirectory(object):
                                                    'Lake-terminating']
         self.inversion_calving_rate = 0.
         self.is_icecap = self.glacier_type == 'Ice cap'
+
+        # Hemisphere
+        self.hemisphere = 'sh' if self.cenlat < 0 else 'nh'
 
         # convert the date
         try:

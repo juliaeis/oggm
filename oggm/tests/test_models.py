@@ -17,7 +17,7 @@ from oggm.core.massbalance import LinearMassBalance
 from oggm.tests import is_slow, RUN_MODEL_TESTS
 import xarray as xr
 from oggm import utils, workflow
-from oggm.cfg import N, SEC_IN_DAY, SEC_IN_YEAR, SEC_IN_MONTHS_HYDRO
+from oggm.cfg import N, SEC_IN_DAY, SEC_IN_YEAR, SEC_IN_MONTH
 
 # Tests
 from oggm.tests.funcs import *
@@ -281,7 +281,7 @@ class TestMassBalance(unittest.TestCase):
             my_mb_on_h = ref_mb_on_h*0.
             for m in np.arange(12):
                 yrm = utils.date_to_floatyear(yr, m + 1)
-                tmp =  mb_mod.get_monthly_mb(h, yrm)*SEC_IN_MONTHS_HYDRO[m]*cfg.RHO
+                tmp =  mb_mod.get_monthly_mb(h, yrm)*SEC_IN_MONTH*cfg.RHO
                 my_mb_on_h += tmp
 
             np.testing.assert_allclose(ref_mb_on_h,
@@ -380,10 +380,10 @@ class TestMassBalance(unittest.TestCase):
         for m in months:
             yr = utils.date_to_floatyear(0, m + 1)
             cmb_mod.temp_bias = 0
-            tmp = cmb_mod.get_monthly_mb(h, yr) * SEC_IN_MONTHS_HYDRO[m] * cfg.RHO
+            tmp = cmb_mod.get_monthly_mb(h, yr) * SEC_IN_MONTH * cfg.RHO
             monthly_1[m] = np.average(tmp, weights=w)
             cmb_mod.temp_bias = 1
-            tmp = cmb_mod.get_monthly_mb(h, yr) * SEC_IN_MONTHS_HYDRO[m] * cfg.RHO
+            tmp = cmb_mod.get_monthly_mb(h, yr) * SEC_IN_MONTH * cfg.RHO
             monthly_2[m] = np.average(tmp, weights=w)
 
         # check that the winter months are close but summer months no
@@ -395,6 +395,38 @@ class TestMassBalance(unittest.TestCase):
             plt.plot(monthly_2, '-', label='Temp bias')
             plt.legend();
             plt.show()
+
+        # Climate info
+        h = np.sort(h)
+        cmb_mod = massbalance.ConstantMassBalance(gdir, bias=0)
+        t, tm, p, ps = cmb_mod.get_climate(h)
+
+        # Simple sanity checks
+        assert np.all(np.diff(t) <= 0)
+        assert np.all(np.diff(tm) <= 0)
+        assert np.all(np.diff(p) == 0)
+        assert np.all(np.diff(ps) >= 0)
+
+        if do_plot:  # pragma: no cover
+            f, axs = plt.subplots(1, 3, figsize=(9, 3))
+            axs = axs.flatten()
+            axs[0].plot(h, t, label='Temp')
+            axs[0].legend();
+            axs[1].plot(h, tm, label='TempMelt')
+            axs[1].legend();
+            axs[2].plot(h, p, label='Prcp')
+            axs[2].plot(h, ps, label='SolidPrcp')
+            axs[2].legend();
+            plt.tight_layout()
+            plt.show()
+
+        # ELA
+        elah = cmb_mod.get_ela()
+        t, tm, p, ps = cmb_mod.get_climate([elah])
+        mb = ps - cmb_mod.mbmod.mu_star * tm
+        # not perfect becauseof time/months issues
+        np.testing.assert_allclose(mb, 0, atol=0.06)
+
 
     def test_random_mb(self):
 
@@ -457,8 +489,8 @@ class TestMassBalance(unittest.TestCase):
         ref_mb = np.zeros(12)
         my_mb = np.zeros(12)
         for yr, m in zip(yrs, time.month):
-            ref_mb[m-1] += np.average(mb_ref.get_monthly_mb(h, yr) * SEC_IN_MONTHS_HYDRO[m-1], weights=w)
-            my_mb[m-1] += np.average(mb_mod.get_monthly_mb(h, yr) * SEC_IN_MONTHS_HYDRO[m-1], weights=w)
+            ref_mb[m-1] += np.average(mb_ref.get_monthly_mb(h, yr) * SEC_IN_MONTH, weights=w)
+            my_mb[m-1] += np.average(mb_mod.get_monthly_mb(h, yr) * SEC_IN_MONTH, weights=w)
         my_mb = my_mb / 31
         ref_mb = ref_mb / 31
         self.assertTrue(utils.rmsd(ref_mb, my_mb) < 0.1)
@@ -530,6 +562,7 @@ class TestModelFlowlines(unittest.TestCase):
         # We set something and everything stays same
         rec.thick = thick
         assert_allclose(rec.thick, thick)
+        assert_allclose(rec.surface_h, surface_h)
         assert_allclose(rec.widths, widths)
         assert_allclose(rec.widths_m, widths_m)
         assert_allclose(rec.section, section)
@@ -537,6 +570,15 @@ class TestModelFlowlines(unittest.TestCase):
         assert_allclose(rec.volume_m3, vol_m3.sum())
         rec.section = section
         assert_allclose(rec.thick, thick)
+        assert_allclose(rec.surface_h, surface_h)
+        assert_allclose(rec.widths, widths)
+        assert_allclose(rec.widths_m, widths_m)
+        assert_allclose(rec.section, section)
+        assert_allclose(rec.area_m2, area_m2.sum())
+        assert_allclose(rec.volume_m3, vol_m3.sum())
+        rec.surface_h = surface_h
+        assert_allclose(rec.thick, thick)
+        assert_allclose(rec.surface_h, surface_h)
         assert_allclose(rec.widths, widths)
         assert_allclose(rec.widths_m, widths_m)
         assert_allclose(rec.section, section)
@@ -602,6 +644,7 @@ class TestModelFlowlines(unittest.TestCase):
             # We set something and everything stays same
             rec.thick = thick
             assert_allclose(rec.thick, thick)
+            assert_allclose(rec.surface_h, surface_h)
             assert_allclose(rec.widths, widths)
             assert_allclose(rec.widths_m, widths_m)
             assert_allclose(rec.section, section)
@@ -609,6 +652,15 @@ class TestModelFlowlines(unittest.TestCase):
             assert_allclose(rec.volume_m3, vol_m3.sum())
             rec.section = section
             assert_allclose(rec.thick, thick)
+            assert_allclose(rec.surface_h, surface_h)
+            assert_allclose(rec.widths, widths)
+            assert_allclose(rec.widths_m, widths_m)
+            assert_allclose(rec.section, section)
+            assert_allclose(rec.area_m2, area_m2.sum())
+            assert_allclose(rec.volume_m3, vol_m3.sum())
+            rec.surface_h = surface_h
+            assert_allclose(rec.thick, thick)
+            assert_allclose(rec.surface_h, surface_h)
             assert_allclose(rec.widths, widths)
             assert_allclose(rec.widths_m, widths_m)
             assert_allclose(rec.section, section)
@@ -677,6 +729,7 @@ class TestModelFlowlines(unittest.TestCase):
             # We set something and everything stays same
             rec.thick = thick
             assert_allclose(rec.thick, thick)
+            assert_allclose(rec.surface_h, surface_h)
             assert_allclose(rec.widths, widths)
             assert_allclose(rec.widths_m, widths_m)
             assert_allclose(rec.section, section)
@@ -684,6 +737,15 @@ class TestModelFlowlines(unittest.TestCase):
             assert_allclose(rec.volume_m3, vol_m3.sum())
             rec.section = section
             assert_allclose(rec.thick, thick)
+            assert_allclose(rec.surface_h, surface_h)
+            assert_allclose(rec.widths, widths)
+            assert_allclose(rec.widths_m, widths_m)
+            assert_allclose(rec.section, section)
+            assert_allclose(rec.area_m2, area_m2.sum())
+            assert_allclose(rec.volume_m3, vol_m3.sum())
+            rec.surface_h = surface_h
+            assert_allclose(rec.thick, thick)
+            assert_allclose(rec.surface_h, surface_h)
             assert_allclose(rec.widths, widths)
             assert_allclose(rec.widths_m, widths_m)
             assert_allclose(rec.section, section)
@@ -754,7 +816,7 @@ class TestModelFlowlines(unittest.TestCase):
             assert_allclose(rec.section, section)
             assert_allclose(rec.area_m2, area_m2.sum())
             assert_allclose(rec.volume_m3, vol_m3.sum())
-
+            assert_allclose(rec.surface_h, surface_h)
 
     def test_mixed(self):
 
@@ -845,6 +907,17 @@ class TestModelFlowlines(unittest.TestCase):
         assert_allclose(rec.section, section)
         assert_allclose(rec.area_m2, area_m2)
         assert_allclose(rec.volume_m3, volume_m3)
+        rec.surface_h = rec.surface_h
+        assert_allclose(rec.thick, thick)
+        assert_allclose(rec.surface_h, surface_h)
+        assert_allclose(rec.widths, widths)
+        assert_allclose(rec.widths_m, widths_m)
+        assert_allclose(rec.section, section)
+        assert_allclose(rec.area_m2, area_m2)
+        assert_allclose(rec.volume_m3, volume_m3)
+        rec.surface_h = rec.surface_h - 10
+        assert_allclose(rec.thick, thick - 10)
+        assert_allclose(rec.surface_h, surface_h - 10)
 
 
 class TestIO(unittest.TestCase):
@@ -1632,6 +1705,45 @@ class TestHEF(unittest.TestCase):
                     ax3.set_title('Length')
                     plt.tight_layout()
                     plt.show()
+
+
+    @is_slow
+    def test_random_sh(self):
+
+        flowline.init_present_time_glacier(self.gdir)
+
+        self.gdir.hemisphere = 'sh'
+        climate.process_cru_data(self.gdir)
+
+        flowline.random_glacier_evolution(self.gdir, nyears=20, seed=4,
+                                          bias=0, filesuffix='_rdn')
+        flowline.run_constant_climate(self.gdir, nyears=20,
+                                      bias=0, filesuffix='_ct')
+
+        paths = [self.gdir.get_filepath('model_run', filesuffix='_rdn'),
+                 self.gdir.get_filepath('model_run', filesuffix='_ct'),
+                 ]
+        for path in paths:
+            with flowline.FileModel(path) as model:
+                vol = model.volume_km3_ts()
+                len = model.length_m_ts()
+                area = model.area_km2_ts()
+                np.testing.assert_allclose(vol.iloc[0], np.mean(vol),
+                                           rtol=0.1)
+                np.testing.assert_allclose(area.iloc[0], np.mean(area),
+                                           rtol=0.1)
+                if do_plot:
+                    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(6, 10))
+                    vol.plot(ax=ax1)
+                    ax1.set_title('Volume')
+                    area.plot(ax=ax2)
+                    ax2.set_title('Area')
+                    len.plot(ax=ax3)
+                    ax3.set_title('Length')
+                    plt.tight_layout()
+                    plt.show()
+
+        self.gdir.hemisphere = 'nh'
 
     @is_slow
     def test_cesm(self):

@@ -16,7 +16,7 @@ import oggm
 from oggm import utils
 from oggm import cfg
 from oggm.tests import is_download
-from oggm.tests.funcs import get_test_dir, patch_url_retrieve
+from oggm.tests.funcs import get_test_dir, patch_url_retrieve, init_hef
 
 _url_retrieve = None
 
@@ -95,17 +95,13 @@ class TestFuncs(unittest.TestCase):
         np.testing.assert_array_equal(y, [0, 1])
         np.testing.assert_array_equal(m, [12, 12])
 
-        yr = 1998 + cfg.CUMSEC_IN_MONTHS_HYDRO[2] / cfg.SEC_IN_YEAR
-        r = utils.floatyear_to_date(yr)
-        self.assertEqual(r, (1998, 4))
-
-        yr = 1998 + (cfg.CUMSEC_IN_MONTHS_HYDRO[2] - 1) / cfg.SEC_IN_YEAR
+        yr = 1998 + 2 / 12
         r = utils.floatyear_to_date(yr)
         self.assertEqual(r, (1998, 3))
 
-        yr = 1998 + cfg.CUMSEC_IN_MONTHS[2] / cfg.SEC_IN_YEAR
-        r = utils.floatyear_to_date(yr, hydro_year=False)
-        self.assertEqual(r, (1998, 4))
+        yr = 1998 + 1 / 12
+        r = utils.floatyear_to_date(yr)
+        self.assertEqual(r, (1998, 2))
 
     def test_date_to_floatyear(self):
 
@@ -156,16 +152,12 @@ class TestFuncs(unittest.TestCase):
         np.testing.assert_array_equal(y, time.year)
         np.testing.assert_array_equal(m, time.month)
 
-        yrh = utils.date_to_floatyear(np.arange(12)+1, np.arange(12)+1)
-        yrn = utils.date_to_floatyear(np.arange(12)+1, np.arange(12)+1,
-                                      hydro_year=False)
-        assert not np.allclose(yrh, yrn)
-
         with self.assertRaises(ValueError):
             utils.monthly_timeseries(1)
 
     def test_hydro_convertion(self):
 
+        # October
         y, m = utils.hydrodate_to_calendardate(1, 1)
         assert (y, m) == (0, 10)
         y, m = utils.hydrodate_to_calendardate(1, 4)
@@ -195,6 +187,30 @@ class TestFuncs(unittest.TestCase):
         np.testing.assert_array_equal(y, time.year)
         np.testing.assert_array_equal(m, time.month)
 
+        # April
+        y, m = utils.hydrodate_to_calendardate(1, 1, start_month=4)
+        assert (y, m) == (0, 4)
+        y, m = utils.hydrodate_to_calendardate(1, 4, start_month=4)
+        assert (y, m) == (0, 7)
+        y, m = utils.hydrodate_to_calendardate(1, 9, start_month=4)
+        assert (y, m) == (0, 12)
+        y, m = utils.hydrodate_to_calendardate(1, 10, start_month=4)
+        assert (y, m) == (1, 1)
+        y, m = utils.hydrodate_to_calendardate(1, 12, start_month=4)
+        assert (y, m) == (1, 3)
+
+        y, m = utils.hydrodate_to_calendardate([1, 1, 1], [1, 4, 12],
+                                               start_month=4)
+        np.testing.assert_array_equal(y, [0, 0, 1])
+        np.testing.assert_array_equal(m, [4, 7, 3])
+
+        # Roundtrip
+        time = pd.period_range('0001-01', '1000-12', freq='M')
+        y, m = utils.calendardate_to_hydrodate(time.year, time.month,
+                                               start_month=4)
+        y, m = utils.hydrodate_to_calendardate(y, m, start_month=4)
+        np.testing.assert_array_equal(y, time.year)
+        np.testing.assert_array_equal(m, time.month)
 
 
 class TestInitialize(unittest.TestCase):
@@ -211,7 +227,8 @@ class TestInitialize(unittest.TestCase):
         expected = os.path.join(self.homedir, 'my_OGGM_wd')
         self.assertEqual(cfg.PATHS['working_dir'], expected)
 
-class TestGlacierDirectory(unittest.TestCase):
+
+class TestWorkflowTools(unittest.TestCase):
 
     def setUp(self):
         cfg.initialize()
@@ -225,7 +242,7 @@ class TestGlacierDirectory(unittest.TestCase):
     def reset_dir(self):
         utils.mkdir(self.testdir, reset=True)
 
-    def test_leclercq(self):
+    def test_leclercq_data(self):
 
         hef_file = utils.get_demo_file('Hintereisferner_RGI5.shp')
         entity = gpd.read_file(hef_file).iloc[0]
@@ -234,6 +251,22 @@ class TestGlacierDirectory(unittest.TestCase):
         df = gdir.get_ref_length_data()
         assert df.name == 'Hintereis'
         assert len(df) == 105
+
+    def test_glacier_characs(self):
+
+        gdir = init_hef()
+
+        df = utils.glacier_characteristics([gdir], path=False)
+        assert len(df) == 1
+        assert np.all(~df.isnull())
+        assert len(df.columns) == 36
+        df = df.iloc[0]
+        np.testing.assert_allclose(df['dem_mean_elev'],
+                                   df['flowline_mean_elev'], atol=5)
+        np.testing.assert_allclose(df['tstar_avg_prcp'],
+                                   2811, atol=5)
+        np.testing.assert_allclose(df['tstar_avg_prcpsol_max_elev'],
+                                   2811, atol=50)
 
 
 def touch(path):
@@ -336,7 +369,7 @@ class TestFakeDownloads(unittest.TestCase):
         rgi_dir = os.path.join(self.dldir, 'rgi60')
         utils.mkdir(rgi_dir)
         make_fake_zipdir(os.path.join(rgi_dir, '01_rgi60_Region'),
-                         fakefile='test.txt')
+                         fakefile='01_rgi60_Region.shp')
         rgi_f = make_fake_zipdir(rgi_dir, fakefile='000_rgi60_manifest.txt')
 
         def down_check(url, cache_name=None, reset=False):
@@ -349,7 +382,15 @@ class TestFakeDownloads(unittest.TestCase):
 
         assert os.path.isdir(rgi)
         assert os.path.exists(os.path.join(rgi, '000_rgi60_manifest.txt'))
-        assert os.path.exists(os.path.join(rgi, '01_rgi60_Region', 'test.txt'))
+        assert os.path.exists(os.path.join(rgi, '01_rgi60_Region',
+                                           '01_rgi60_Region.shp'))
+
+        with FakeDownloadManager('_progress_urlretrieve', down_check):
+            rgi_f = utils.get_rgi_region_file('01', version='6')
+
+        assert os.path.exists(rgi_f)
+        assert '01_rgi60_Region.shp' in rgi_f
+
 
     def test_rgi_intersects(self):
 
