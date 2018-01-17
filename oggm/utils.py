@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 # Github repository and commit hash/branch name/tag name on that repository
 # The given commit will be downloaded from github and used as source for all sample data
 SAMPLE_DATA_GH_REPO = 'OGGM/oggm-sample-data'
-SAMPLE_DATA_COMMIT = '22da1500d1d602b7ab7c80519c7caf61fb03766e'
+SAMPLE_DATA_COMMIT = '3332594f9e8050246af131b8a493dbc958449368'
 
 CRU_SERVER = ('https://crudata.uea.ac.uk/cru/data/hrg/cru_ts_4.01/cruts'
               '.1709081022.v4.01/')
@@ -391,10 +391,10 @@ def parse_rgi_meta(version=None):
         return _RGI_METADATA[version]
 
     # Parse RGI metadata
+    _ = get_demo_file('rgi_regions.csv')
     _d = os.path.join(cfg.CACHE_DIR,
                       'oggm-sample-data-%s' % SAMPLE_DATA_COMMIT,
                       'rgi_meta')
-
     reg_names = pd.read_csv(os.path.join(_d, 'rgi_regions.csv'), index_col=0)
     if version in ['4', '5']:
         # The files where different back then
@@ -409,6 +409,7 @@ def parse_rgi_meta(version=None):
 
     _RGI_METADATA[version] = (reg_names, subreg_names)
     return _RGI_METADATA[version]
+
 
 class SuperclassMeta(type):
     """Metaclass for abstract base classes.
@@ -1622,7 +1623,7 @@ def get_rgi_region_file(region, version=None):
     """
 
     rgi_dir = get_rgi_dir(version=version)
-    f = list(glob.glob(rgi_dir + "/{}_*/{}_*.shp".format(region, region)))
+    f = list(glob.glob(rgi_dir + "/*/{}_*.shp".format(region)))
     assert len(f) == 1
     return f[0]
 
@@ -2142,11 +2143,11 @@ def glacier_characteristics(gdirs, filesuffix='', path=True,
                             inversion_only=False):
     """Gathers as many statistics as possible about a list of glacier
     directories.
-
+    
     It can be used to do result diagnostics and other stuffs. If the data
     necessary for a statistic is not available (e.g.: flowlines length) it
     will simply be ignored.
-
+    
     Parameters
     ----------
     gdirs: the list of GlacierDir to process.
@@ -2156,7 +2157,7 @@ def glacier_characteristics(gdirs, filesuffix='', path=True,
         Set to "True" in order  to store the info in the working directory
         Set to a path to store the file to your chosen location
     inversion_only: bool
-        if one wants to summarize the inversion output only
+        if one wants to summarize the inversion output only (including calving)
     """
     from oggm.core.massbalance import ConstantMassBalance
 
@@ -2167,6 +2168,8 @@ def glacier_characteristics(gdirs, filesuffix='', path=True,
 
         # Easy stats - this should always be possible
         d['rgi_id'] = gdir.rgi_id
+        d['rgi_region'] = gdir.rgi_region
+        d['rgi_subregion'] = gdir.rgi_subregion
         d['name'] = gdir.name
         d['cenlon'] = gdir.cenlon
         d['cenlat'] = gdir.cenlat
@@ -2188,6 +2191,18 @@ def glacier_characteristics(gdirs, filesuffix='', path=True,
                 d['inv_thickness_m'] = d['inv_volume_km3'] / area * 1000
                 d['vas_volume_km3'] = 0.034*(area**1.375)
                 d['vas_thickness_m'] = d['vas_volume_km3'] / area * 1000
+        except:
+            pass
+        try:
+            # Calving
+            all_calving_data = []
+            all_width = []
+            cl = gdir.read_pickle('calving_output')
+            for c in cl:
+                all_calving_data = c['calving_fluxes'][-1]
+                all_width = c['t_width']
+            d['calving_flux'] = all_calving_data
+            d['calving_front_width'] = all_width
         except:
             pass
         if inversion_only:
@@ -2269,18 +2284,6 @@ def glacier_characteristics(gdirs, filesuffix='', path=True,
                 d['tstar_avg_' + n + '_max_elev'] = v[2]
                 d['tstar_avg_' + n + '_min_elev'] = v[3]
             d['tstar_avg_prcp'] = p[0]
-        except:
-            pass
-        try:
-            # Calving
-            all_calving_data = []
-            all_width = []
-            cl = gdir.read_pickle('calving_output')
-            for c in cl:
-                all_calving_data = c['calving_fluxes'][-1]
-                all_width = c['t_width']
-            d['calving_flux'] = all_calving_data
-            d['calving_front_width'] = all_width
         except:
             pass
 
@@ -2602,7 +2605,7 @@ class GlacierDirectory(object):
             summary += ['  Name: ' + self.name]
         summary += ['  Glacier type: ' + str(self.glacier_type)]
         summary += ['  Terminus type: ' + str(self.terminus_type)]
-        summary += ['  Area: ' + str(self.rgi_area_km2) + ' mk2']
+        summary += ['  Area: ' + str(self.rgi_area_km2) + ' km2']
         summary += ['  Lon, Lat: (' + str(self.cenlon) + ', ' +
                     str(self.cenlat) + ')']
         if os.path.isfile(self.get_filepath('glacier_grid')):
@@ -2876,7 +2879,7 @@ class GlacierDirectory(object):
         for fl in fls:
             w = np.append(w, fl.widths)
             h = np.append(h, fl.surface_h)
-        return h, w * fl.dx * self.grid.dx
+        return h, w * self.grid.dx
 
     def get_ref_mb_data(self):
         """Get the reference mb data from WGMS (for some glaciers only!)."""

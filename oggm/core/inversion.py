@@ -60,12 +60,6 @@ def prepare_for_inversion(gdir, add_debug_var=False,
     # variables
     fls = gdir.read_pickle('inversion_flowlines')
 
-    # for testing only
-    if 'invert_with_rectangular' in cfg.PARAMS:
-        invert_with_rectangular = cfg.PARAMS['invert_with_rectangular']
-    if 'invert_all_rectangular' in cfg.PARAMS:
-        invert_all_rectangular = cfg.PARAMS['invert_all_rectangular']
-
     towrite = []
     for fl in fls:
 
@@ -405,11 +399,15 @@ def filter_inversion_output(gdir):
     """Filters the last few grid point whilst conserving total volume.
     """
 
+    if gdir.is_tidewater:
+        # No need for filter in tidewater case
+        return
+
     cls = gdir.read_pickle('inversion_output')
     for cl in cls:
 
         init_vol = np.sum(cl['volume'])
-        if init_vol == 0 or gdir.is_tidewater or not cl['is_last']:
+        if init_vol == 0 or not cl['is_last']:
             continue
 
         w = cl['width']

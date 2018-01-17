@@ -74,8 +74,8 @@ def up_to_climate(reset=False):
 
     # Working dir
     cfg.PATHS['working_dir'] = TEST_DIR
-
     cfg.PATHS['dem_file'] = get_demo_file('srtm_oetztal.tif')
+    cfg.set_intersects_db(get_demo_file('rgi_intersect_oetztal.shp'))
 
     # Read in the RGI file
     rgi_file = get_demo_file('rgi_oetztal.shp')
@@ -89,7 +89,6 @@ def up_to_climate(reset=False):
     cfg.PARAMS['optimize_inversion_params'] = True
     cfg.PARAMS['use_optimized_inversion_params'] = True
     cfg.PARAMS['tstar_search_window'] = [1902, 0]
-    cfg.PARAMS['invert_with_rectangular'] = False
     cfg.PARAMS['run_mb_calibration'] = True
 
     # Go
