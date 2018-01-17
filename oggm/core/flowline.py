@@ -13,7 +13,7 @@ from time import gmtime, strftime
 import numpy as np
 import shapely.geometry as shpg
 import xarray as xr
-
+from scipy.ndimage.filters import median_filter
 # Locals
 from oggm import __version__
 import oggm.cfg as cfg
@@ -372,7 +372,7 @@ class MixedBedFlowline(Flowline):
         ds['lambdas'] = (['x'],  self._lambdas)
 
 
-class FlowlineModel(object):
+class  FlowlineModel(object):
     """Interface to the actual model"""
 
     def __init__(self, flowlines, mb_model=None, y0=0., glen_a=None,
@@ -578,9 +578,51 @@ class FlowlineModel(object):
         """Advance one step."""
         raise NotImplementedError
 
+    def run_until_back(self, y1):
+        self.t=0
+        t=(self.y0-y1) * SEC_IN_YEAR
+
+        while self.t < t:
+            #print(self.fls[-1].thick)
+            self.step_back(t-self.t)
+            if np.max(self.fls[-1].thick)>1e10:
+                #print('smooth')
+
+            #self.fls[-1].thick = median_filter(self.fls[-1].thick, size=5, mode='nearest')
+                signs = np.sign(np.gradient(self.fls[-1].section))
+
+                start_filter = np.where(np.abs(np.diff(signs)) > 1)[0][0]
+                end_filter = np.where(np.abs(np.diff(signs)) > 1)[0][-1]
+                if start_filter > 10:
+                    start_filter = start_filter -10
+
+                if end_filter < 190:
+                    end_filter=end_filter+10
+
+                a = self.fls[-1].section[:int(start_filter)]
+                b = median_filter(self.fls[-1].section[
+                                  int(start_filter):int(end_filter)],
+                                  size=11, mode='nearest')
+                c = self.fls[-1].section[int(end_filter):]
+                filt_section = (np.concatenate((a, b, c)))
+
+                self.fls[-1].section = filt_section
+                #print(self.fls[-1].section)
+
+        # Check for domain bounds
+        if self.check_for_boundaries:
+            if self.fls[-1].thick[-1] > 10:
+                    raise RuntimeError('Glacier exceeds domain boundaries.')
+
+        # Check for NaNs
+        for fl in self.fls:
+            if np.any(~np.isfinite(fl.thick)):
+                raise FloatingPointError('NaN in numerical solution.')
+
     def run_until(self, y1):
 
         t = (y1-self.y0) * SEC_IN_YEAR
+
         while self.t < t:
             self.step(t-self.t)
 
@@ -924,6 +966,135 @@ class FluxBasedModel(FlowlineModel):
         # Next step
         self.t += dt
         return dt
+
+    def step_back(self, dt):
+        """Advance one step."""
+
+        # This is to guarantee a precise arrival on a specific date if asked
+        min_dt = dt if dt < self.min_dt else self.min_dt
+
+        # Loop over tributaries to determine the flux rate
+        flxs = []
+        aflxs = []
+        for fl, trib, (slope_stag, thick_stag, section_stag, znxm1, znx) \
+                in zip(self.fls, self._trib, self._stags):
+
+            surface_h = fl.surface_h
+            thick = fl.thick
+            section = fl.section
+            dx = fl.dx_meter
+
+            # Reset
+            znxm1[:] = 0
+            znx[:] = 0
+
+            # If it is a tributary, we use the branch it flows into to compute
+            # the slope of the last grid points
+            is_trib = trib[0] is not None
+            if is_trib:
+                fl_to = self.fls[trib[0]]
+                ide = fl.flows_to_indice
+                surface_h = np.append(surface_h, fl_to.surface_h[ide])
+                thick = np.append(thick, thick[-1])
+                section = np.append(section, section[-1])
+            elif self.is_tidewater:
+                # For tidewater glacier, we trick and set the outgoing thick
+                # to zero (for numerical stability and this should quite OK
+                # represent what happens at the calving tongue)
+                surface_h = np.append(surface_h, surface_h[-1] - thick[-1])
+                thick = np.append(thick, 0)
+                section = np.append(section, 0)
+
+            # Staggered gradient
+            slope_stag[0] = 0
+            slope_stag[1:-1] = (surface_h[0:-1] - surface_h[1:]) / dx
+            slope_stag[-1] = slope_stag[-2]
+
+            # Convert to angle?
+            # slope_stag = np.sin(np.arctan(slope_stag))
+
+            # Staggered thick
+            thick_stag[1:-1] = (thick[0:-1] + thick[1:]) / 2.
+            thick_stag[[0, -1]] = thick[[0, -1]]
+
+            # Staggered velocity (Deformation + Sliding)
+            # _fd = 2/(N+2) * self.glen_a
+            rhogh = (RHO*G*slope_stag)**N
+            u_stag = (thick_stag**(N+1)) * self._fd * rhogh + \
+                     (thick_stag**(N-1)) * self.fs * rhogh
+
+            # Staggered section
+            section_stag[1:-1] = (section[0:-1] + section[1:]) / 2.
+            section_stag[[0, -1]] = section[[0, -1]]
+
+            # Staggered flux rate
+            flx_stag = u_stag * section_stag / dx
+
+            index = np.where(fl.thick < 0.01)[0]
+            #print(np.where(fl.thick < 0.01)[0])
+            flx_stag[index]=0
+            # Store the results
+            if is_trib:
+                flxs.append(flx_stag[:-1])
+                aflxs.append(znxm1)
+                u_stag = u_stag[:-1]
+            elif self.is_tidewater:
+                flxs.append(flx_stag[:-1])
+                aflxs.append(znxm1)
+                u_stag = u_stag[:-1]
+            else:
+                flxs.append(flx_stag)
+                aflxs.append(znx)
+
+            # CFL condition
+            maxu = np.max(np.abs(u_stag))
+            if maxu > 0.:
+                _dt = self.cfl_number * dx / maxu
+            else:
+                _dt = self.max_dt
+            if _dt < dt:
+                dt = _dt
+
+        # Time step
+        self.dt_warning = dt < min_dt
+        dt = np.clip(dt, min_dt, self.max_dt)
+
+        # A second loop for the mass exchange
+        for fl, flx_stag, aflx, trib in zip(self.fls, flxs, aflxs,
+                                                 self._trib):
+
+            dx = fl.dx_meter
+
+            # Mass balance
+            widths = fl.widths_m
+            mb = self.get_mb(fl.surface_h, self.y0 - self.t / SEC_IN_YEAR, fl_id=id(fl))
+            # Allow parabolic beds to grow
+            widths = np.where((mb > 0.) & (widths == 0), 10., widths)
+            mb = dt * mb * widths
+            mb[np.where(fl.thick < 0.01)[0]]=0
+            # Update section with flowing and mass balance
+            new_section = fl.section - (flx_stag[0:-1] - flx_stag[1:])*dt - \
+                          aflx*dt - mb
+
+            # Keep positive values only and store
+            fl.section = new_section.clip(0)
+
+            # Add the last flux to the tributary
+            # this is ok because the lines are sorted in order
+            if trib[0] is not None:
+                aflxs[trib[0]][trib[1]:trib[2]] += flx_stag[-1].clip(0) * \
+                                                   trib[3]
+            elif self.is_tidewater:
+                # -2 because the last flux is zero per construction
+                # TODO: not sure if this is the way to go yet,
+                # but mass conservation is OK
+                self.calving_m3_since_y0 += flx_stag[-2].clip(0)*dt*dx
+
+        # Next step
+        self.t += dt
+        return dt
+
+
 
 
 class MassConservationChecker(FluxBasedModel):
@@ -1619,7 +1790,7 @@ def iterative_initial_glacier_search(gdir, y0=None, init_bias=0., rtol=0.005,
 
 
 def _run_with_numerical_tests(gdir, filesuffix, mb, ys, ye, kwargs,
-                              zero_initial_glacier=False, model_fls=None):
+                              zero_initial_glacier=False, init_model_fls=None):
     """Quick n dirty function to avoid copy-paste smell"""
 
     run_path = gdir.get_filepath('model_run', filesuffix=filesuffix,
@@ -1630,10 +1801,10 @@ def _run_with_numerical_tests(gdir, filesuffix, mb, ys, ye, kwargs,
     steps = ['default', 'conservative', 'ultra-conservative']
     for step in steps:
         log.info('(%s) trying %s time stepping scheme.', gdir.rgi_id, step)
-        if model_fls is None:
+        if init_model_fls is None:
             fls = gdir.read_pickle('model_flowlines')
         else:
-            fls = model_fls
+            fls = init_model_fls
         if zero_initial_glacier:
             for fl in fls:
                 fl.thick = fl.thick * 0.
@@ -1657,6 +1828,7 @@ def _run_with_numerical_tests(gdir, filesuffix, mb, ys, ye, kwargs,
 @entity_task(log)
 def random_glacier_evolution(gdir, nyears=1000, y0=None, halfsize=15,
                              bias=None, seed=None, temperature_bias=None,
+                             filename='climate_monthly', input_filesuffix='',
                              filesuffix='', init_model_fls=None,
                              zero_initial_glacier=False,
                              **kwargs):
@@ -1683,6 +1855,11 @@ def random_glacier_evolution(gdir, nyears=1000, y0=None, halfsize=15,
          be usefull if you want to have the same climate years for all of them
      temperature_bias : float
          add a bias to the temperature timeseries
+     filename : str
+         name of the climate file, e.g. 'climate_monthly' (default) or
+         'cesm_data'
+     input_filesuffix: str
+         filesuffix for the input climate file
      filesuffix : str
          this add a suffix to the output file (useful to avoid overwriting
          previous experiments)
@@ -1709,18 +1886,20 @@ def random_glacier_evolution(gdir, nyears=1000, y0=None, halfsize=15,
     ys = 0
     ye = ys + nyears
     mb = mbmods.RandomMassBalance(gdir, y0=y0, halfsize=halfsize,
-                                  bias=bias, seed=seed)
+                                  bias=bias, seed=seed, filename=filename,
+                                  input_filesuffix=input_filesuffix)
     if temperature_bias is not None:
         mb.temp_bias = temperature_bias
 
     return _run_with_numerical_tests(gdir, filesuffix, mb, ys, ye, kwargs,
-                                     model_fls=init_model_fls,
+                                     init_model_fls=init_model_fls,
                                      zero_initial_glacier=zero_initial_glacier)
 
 
 @entity_task(log)
 def run_constant_climate(gdir, nyears=1000, y0=None, bias=None,
                          temperature_bias=None, filesuffix='',
+                         filename='climate_monthly', input_filesuffix='',
                          init_model_fls=None,
                          zero_initial_glacier=False,
                          **kwargs):
@@ -1740,6 +1919,11 @@ def run_constant_climate(gdir, nyears=1000, y0=None, bias=None,
          to zero
      temperature_bias : float
          add a bias to the temperature timeseries
+     filename : str
+         name of the climate file, e.g. 'climate_monthly' (default) or
+         'cesm_data'
+     input_filesuffix: str
+         filesuffix for the input climate file
      filesuffix : str
          this add a suffix to the output file (useful to avoid overwriting
          previous experiments)
@@ -1763,12 +1947,13 @@ def run_constant_climate(gdir, nyears=1000, y0=None, bias=None,
     kwargs.setdefault('fs', fs)
     kwargs.setdefault('glen_a', glen_a)
 
-    mb = mbmods.ConstantMassBalance(gdir, y0=y0, bias=bias)
+    mb = mbmods.ConstantMassBalance(gdir, y0=y0, bias=bias, filename=filename,
+                                    input_filesuffix=input_filesuffix)
     if temperature_bias is not None:
         mb.temp_bias = temperature_bias
 
     return _run_with_numerical_tests(gdir, filesuffix, mb, 0, nyears, kwargs,
-                                     model_fls=init_model_fls,
+                                     init_model_fls=init_model_fls,
                                      zero_initial_glacier=zero_initial_glacier)
 
 
@@ -1817,4 +2002,4 @@ def run_from_climate_data(gdir, ys=None, ye=None, filename='climate_monthly',
     mb = mbmods.PastMassBalance(gdir, filename=filename,
                                 input_filesuffix=input_filesuffix)
     return _run_with_numerical_tests(gdir, filesuffix, mb, ys, ye, kwargs,
-                                     model_fls=init_model_fls)
+                                     init_model_fls=init_model_fls)

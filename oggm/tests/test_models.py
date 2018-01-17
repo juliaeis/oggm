@@ -143,6 +143,7 @@ class TestOtherGlacier(unittest.TestCase):
 
         # Init
         cfg.initialize()
+        cfg.set_intersects_db(get_demo_file('rgi_intersect_oetztal.shp'))
         cfg.PATHS['dem_file'] = utils.get_demo_file('srtm_oetztal.tif')
         cfg.PATHS['climate_file'] = utils.get_demo_file('histalp_merged_hef.nc')
 
@@ -424,8 +425,8 @@ class TestMassBalance(unittest.TestCase):
         elah = cmb_mod.get_ela()
         t, tm, p, ps = cmb_mod.get_climate([elah])
         mb = ps - cmb_mod.mbmod.mu_star * tm
-        # not perfect becauseof time/months issues
-        np.testing.assert_allclose(mb, 0, atol=0.06)
+        # not perfect because of time/months/zinterp issues
+        np.testing.assert_allclose(mb, 0, atol=0.08)
 
 
     def test_random_mb(self):
@@ -1255,6 +1256,7 @@ class TestIdealisedInversion(unittest.TestCase):
 
         # Init
         cfg.initialize()
+        cfg.set_intersects_db(get_demo_file('rgi_intersect_oetztal.shp'))
         cfg.PATHS['dem_file'] = get_demo_file('hef_srtm.tif')
         cfg.PATHS['climate_file'] = get_demo_file('histalp_merged_hef.nc')
 

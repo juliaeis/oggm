@@ -212,6 +212,12 @@ class TestFuncs(unittest.TestCase):
         np.testing.assert_array_equal(y, time.year)
         np.testing.assert_array_equal(m, time.month)
 
+    def test_rgi_meta(self):
+        cfg.initialize()
+        reg_names, subreg_names = utils.parse_rgi_meta(version='6')
+        assert len(reg_names) == 19
+        assert reg_names.loc[3].values[0] == 'Arctic Canada North'
+
 
 class TestInitialize(unittest.TestCase):
 
@@ -259,7 +265,7 @@ class TestWorkflowTools(unittest.TestCase):
         df = utils.glacier_characteristics([gdir], path=False)
         assert len(df) == 1
         assert np.all(~df.isnull())
-        assert len(df.columns) == 36
+        assert len(df.columns) >= 36
         df = df.iloc[0]
         np.testing.assert_allclose(df['dem_mean_elev'],
                                    df['flowline_mean_elev'], atol=5)
