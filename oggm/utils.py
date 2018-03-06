@@ -4,6 +4,7 @@
 # Builtins
 import glob
 import os
+import tempfile
 import gzip
 import shutil
 import zipfile
@@ -49,6 +50,11 @@ except ImportError:
     from rasterio.tools.merge import merge as merge_tool
 import multiprocessing as mp
 
+try:
+    ModuleNotFoundError
+except NameError:
+    ModuleNotFoundError = ImportError
+
 # Locals
 from oggm import __version__
 import oggm.cfg as cfg
@@ -60,7 +66,7 @@ logger = logging.getLogger(__name__)
 # Github repository and commit hash/branch name/tag name on that repository
 # The given commit will be downloaded from github and used as source for all sample data
 SAMPLE_DATA_GH_REPO = 'OGGM/oggm-sample-data'
-SAMPLE_DATA_COMMIT = '3332594f9e8050246af131b8a493dbc958449368'
+SAMPLE_DATA_COMMIT = '5e15bb8c19191950b3ea0dbfe87d0d68e15aedc9'
 
 CRU_SERVER = ('https://crudata.uea.ac.uk/cru/data/hrg/cru_ts_4.01/cruts'
               '.1709081022.v4.01/')
@@ -197,7 +203,7 @@ def _progress_urlretrieve(url, cache_name=None, reset=False):
         except:
             pass
         return res
-    except ImportError:
+    except (ImportError, ModuleNotFoundError):
         return _urlretrieve(url, cache_obj_name=cache_name, reset=reset)
 
 
@@ -310,6 +316,24 @@ def del_empty_dirs(s_dir):
     return b_empty
 
 
+def gettempdir(dirname='', reset=False):
+    """Get a temporary directory.
+
+    Parameters
+    ----------
+    dirname : str
+        if you want to give it a name
+    reset : bool
+        if it has to be emptied first.
+
+    Returns
+    -------
+    the path to the temporary directory
+    """
+    return mkdir(os.path.join(tempfile.gettempdir(), 'OGGM', dirname),
+                 reset=reset)
+
+
 def get_sys_info():
     """Returns system information as a dict"""
 
@@ -407,6 +431,9 @@ def parse_rgi_meta(version=None):
                               zip(subreg_names['O1'], subreg_names['O2'])]
         subreg_names = subreg_names[['Full_name']]
 
+    # For idealized
+    reg_names.loc[0] = ['None']
+    subreg_names.loc['00-00'] = ['None']
     _RGI_METADATA[version] = (reg_names, subreg_names)
     return _RGI_METADATA[version]
 
@@ -723,15 +750,19 @@ def mkdir(path, reset=False):
     Parameters
     ----------
     reset: erase the content of the directory if exists
+
+    Returns
+    -------
+    the path
     """
 
     if reset and os.path.exists(path):
         shutil.rmtree(path)
-
     try:
         os.makedirs(path)
     except FileExistsError:
         pass
+    return path
 
 
 def include_patterns(*patterns):
@@ -1288,8 +1319,22 @@ def pipe_log(gdir, task_func_name, err=None):
             f.write(sep + '\n')
 
 
-def write_centerlines_to_shape(gdirs, filename):
-    """Write centerlines in a shapefile"""
+def write_centerlines_to_shape(gdirs, filesuffix='', path=True):
+    """Write the centerlines in a shapefile.
+
+    Parameters
+    ----------
+    gdirs: the list of GlacierDir to process.
+    filesuffix : str
+        add suffix to output file
+    path:
+        Set to "True" in order  to store the info in the working directory
+        Set to a path to store the file to your chosen location
+    """
+
+    if path is True:
+        path = os.path.join(cfg.PATHS['working_dir'],
+                            'glacier_centerlines'+filesuffix+'.shp')
 
     olist = []
     for gdir in gdirs:
@@ -1319,7 +1364,7 @@ def write_centerlines_to_shape(gdirs, filename):
                 dict((k, v) for k, v in row.items() if k != 'geometry'),
             'geometry': mapping(row['geometry'])}
 
-    with fiona.open(filename, 'w', driver='ESRI Shapefile',
+    with fiona.open(path, 'w', driver='ESRI Shapefile',
                     crs=crs, schema=shema) as c:
         for i, row in odf.iterrows():
             c.write(feature(i, row))
@@ -1537,7 +1582,7 @@ def get_glathida_file():
     # Roll our own
     download_oggm_files()
     sdir = os.path.join(cfg.CACHE_DIR, 'oggm-sample-data-%s' % SAMPLE_DATA_COMMIT, 'glathida')
-    outf = os.path.join(sdir, 'rgi_glathida_links_2014_RGIV5.csv')
+    outf = os.path.join(sdir, 'rgi_glathida_links.csv')
     assert os.path.exists(outf)
     return outf
 
@@ -1656,11 +1701,11 @@ def _get_rgi_intersects_dir_unlocked(version=None, reset=False):
     rgi_dir = os.path.abspath(os.path.expanduser(rgi_dir))
     mkdir(rgi_dir, reset=reset)
 
-    dfile = 'https://www.dropbox.com/s/'
+    dfile = 'https://cluster.klima.uni-bremen.de/~fmaussion/rgi/'
     if version == '5':
-        dfile += 'y73sdxygdiq7whv/RGI_V5_Intersects.zip?dl=1'
+        dfile += 'RGI_V5_Intersects.zip'
     elif version == '6':
-        dfile += 'vawryxl8lkzxowu/RGI_V6_Intersects.zip?dl=1'
+        dfile += 'RGI_V6_Intersects.zip'
 
     test_file = os.path.join(rgi_dir, 'RGI_V' + version + '_Intersects',
                              'Intersects_OGGM_Manifest.txt')
@@ -1672,6 +1717,34 @@ def _get_rgi_intersects_dir_unlocked(version=None, reset=False):
             zf.extractall(rgi_dir)
 
     return os.path.join(rgi_dir, 'RGI_V' + version + '_Intersects')
+
+
+def get_rgi_intersects_region_file(region, version=None):
+    """Returns a path to a RGI regional intersect file.
+
+    If the RGI files are not present, download them. Setting region=00 gives
+    you the global file.
+
+    Parameters
+    ----------
+    region: str
+        from '00' to '19'
+    version: str
+        '5', '6', defaults to None (linking to the one specified in cfg.params)
+
+    Returns
+    -------
+    path to the RGI shapefile
+    """
+
+    rgi_dir = get_rgi_intersects_dir(version=version)
+    if region == '00':
+        version = 'AllRegs'
+        region = '*'
+    f = list(glob.glob(os.path.join(rgi_dir, "*", '*intersects*' + region +
+                                    '_rgi*' + version + '*.shp')))
+    assert len(f) == 1
+    return f[0]
 
 
 def get_cru_file(var=None):
@@ -2264,7 +2337,7 @@ def glacier_characteristics(gdirs, filesuffix='', path=True,
             mbh = mbmod.get_annual_mb(h, w) * SEC_IN_YEAR * cfg.RHO
             pacc = np.where(mbh >= 0)
             pab = np.where(mbh < 0)
-            d['tstar_aar'] = np.sum(w[pacc]) / np.sum(w[pab])
+            d['tstar_aar'] = np.sum(w[pacc]) / np.sum(w)
             try:
                 # Try to get the slope
                 mb_slope, _, _, _, _ = stats.linregress(h[pab], mbh[pab])
@@ -2352,7 +2425,8 @@ class entity_task(object):
             task_name = task_func.__name__
 
             # Filesuffix are typically used to differentiate tasks
-            fsuffix = kwargs.get('filesuffix', False)
+            fsuffix = (kwargs.get('filesuffix', False) or
+                       kwargs.get('output_filesuffix', False))
             if fsuffix:
                 task_name += fsuffix
 
@@ -2413,6 +2487,64 @@ def filter_rgi_name(name):
         return filter_rgi_name(name[:-1])
 
     return name.strip().title()
+
+
+def idealized_gdir(surface_h, widths_m, map_dx, flowline_dx=1,
+                   base_dir=None, reset=False):
+    """Creates a glacier directory with flowline input data only.
+
+    This is useful for testing, or for idealized experiments.
+
+    Parameters
+    ----------
+    surface_h : ndarray
+        the surface elevation of the flowline's grid points (in m).
+    widths_m : ndarray
+        the widths of the flowline's grid points (in m).
+    map_dx : float
+        the grid spacing (in m)
+    flowline_dx : int
+        the flowline grid spacing (in units of map_dx, often it should be 1)
+    base_dir : str
+        path to the directory where to open the directory.
+        Defaults to `cfg.PATHS['working_dir'] + /per_glacier/`
+    reset : bool, default=False
+        empties the directory at construction
+
+    Returns
+    -------
+    a GlacierDirectory instance
+    """
+
+    from oggm.core.centerlines import Centerline
+
+    # Area from geometry
+    area_km2 = np.sum(widths_m * map_dx * flowline_dx) * 1e-6
+
+    # Dummy entity - should probably also change the geometry
+    entity = gpd.read_file(get_demo_file('Hintereisferner_RGI5.shp')).iloc[0]
+    entity.Area = area_km2
+    entity.CenLat = 0
+    entity.CenLon = 0
+    entity.Name = ''
+    entity.RGIId = 'RGI50-00.00000'
+    entity.O1Region = '00'
+    entity.O2Region = '0'
+    gdir = GlacierDirectory(entity, base_dir=base_dir, reset=reset)
+
+    # Idealized flowline
+    coords = np.arange(0, len(surface_h)-0.5, 1)
+    line = shpg.LineString(np.vstack([coords, coords * 0.]).T)
+    fl = Centerline(line, dx=flowline_dx, surface_h=surface_h)
+    fl.widths = widths_m / map_dx
+    fl.is_rectangular = np.ones(fl.nx).astype(np.bool)
+    gdir.write_pickle([fl], 'inversion_flowlines')
+
+    # Idealized map
+    grid = salem.Grid(nxny=(1, 1), dxdy=(map_dx, map_dx), x0y0=(0, 0))
+    grid.to_json(gdir.get_filepath('glacier_grid'))
+
+    return gdir
 
 
 class GlacierDirectory(object):
