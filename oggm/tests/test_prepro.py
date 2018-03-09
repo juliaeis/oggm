@@ -25,7 +25,7 @@ import oggm.cfg as cfg
 from oggm import utils
 from oggm.utils import get_demo_file, tuple2int
 from oggm.tests import is_slow, RUN_PREPRO_TESTS
-from oggm.tests.funcs import get_test_dir, patch_url_retrieve
+from oggm.tests.funcs import get_test_dir, patch_url_retrieve_github
 from oggm import workflow
 
 # do we event want to run the tests?
@@ -37,7 +37,7 @@ _url_retrieve = None
 
 def setup_module(module):
     module._url_retrieve = utils._urlretrieve
-    utils._urlretrieve = patch_url_retrieve
+    utils._urlretrieve = patch_url_retrieve_github
 
 
 def teardown_module(module):
@@ -262,6 +262,41 @@ class TestCenterlines(unittest.TestCase):
         self.assertEqual(_heads, _headsi[::-1])
         self.assertEqual(_heads, [heads[h] for h in [2,5,6,7]])
 
+    def test_mask_to_polygon(self):
+        from oggm.core.centerlines import _mask_to_polygon
+
+        mask = np.zeros((5, 5))
+        mask[1, 1] = 1
+        p1, p2 = _mask_to_polygon(mask)
+        assert p1 == p2
+
+        mask = np.zeros((5, 5))
+        mask[1:-1, 1:-1] = 1
+        p1, p2 = _mask_to_polygon(mask)
+        assert p1 == p2
+
+        mask = np.zeros((5, 5))
+        mask[1:-1, 1:-1] = 1
+        mask[2, 2] = 0
+        p1, _ = _mask_to_polygon(mask)
+        assert len(p1.interiors) == 1
+        assert p1.exterior == p2.exterior
+        for i_line in p1.interiors:
+            assert p2.contains(i_line)
+
+        n = 30
+        for i in range(n):
+            mask = np.zeros((n, n))
+            mask[1:-1, 1:-1] = 1
+            _, p2 = _mask_to_polygon(mask)
+            for i in range(n*2):
+                mask[np.random.randint(2, n-2), np.random.randint(2, n-2)] = 0
+            p1, _ = _mask_to_polygon(mask)
+            assert len(p1.interiors) > 1
+            assert p1.exterior == p2.exterior
+            for i_line in p1.interiors:
+                assert p2.contains(i_line)
+
     def test_centerlines(self):
 
         hef_file = get_demo_file('Hintereisferner.shp')
@@ -426,8 +461,8 @@ class TestCenterlines(unittest.TestCase):
         nb = len(np.where(rest == 2)[0])
         nc = len(np.where(rest == 1)[0])
         nd = len(np.where(rest == 0)[0])
-        denom = np.float64((na+nc)*(nd+nc)+(na+nb)*(nd+nb))
-        hss = np.float64(2.) * ((na*nd)-(nb*nc)) / denom
+        denom = np.float((na+nc)*(nd+nc)+(na+nb)*(nd+nb))
+        hss = np.float(2.) * ((na*nd)-(nb*nc)) / denom
         if cfg.PARAMS['grid_dx_method'] == 'linear':
             self.assertTrue(hss > 0.53)
         if cfg.PARAMS['grid_dx_method'] == 'fixed':  # quick fix
@@ -2028,8 +2063,8 @@ class TestGCMClimate(unittest.TestCase):
                 scesm2 = scesm2.groupby(scesm2.month).mean()
                 # No more than one degree? (silly test)
                 np.testing.assert_allclose(scesm1.temp, scesm2.temp, atol=1)
-                # N more than 20%? (silly test)
-                np.testing.assert_allclose(scesm1.prcp, scesm2.prcp, rtol=0.2)
+                # N more than 30%? (silly test)
+                np.testing.assert_allclose(scesm1.prcp, scesm2.prcp, rtol=0.3)
 
     def test_compile_climate_input(self):
 
@@ -2100,6 +2135,73 @@ class TestGCMClimate(unittest.TestCase):
                                            clim_cesm2.ref_pix_lon)
 
 
+class TestIdealizedGdir(unittest.TestCase):
+
+    def setUp(self):
+
+        # test directory
+        self.testdir = os.path.join(get_test_dir(), 'tmp')
+        if not os.path.exists(self.testdir):
+            os.makedirs(self.testdir)
+        self.clean_dir()
+
+        # Init
+        cfg.initialize()
+        cfg.PATHS['working_dir'] = self.testdir
+        cfg.PATHS['climate_file'] = get_demo_file('histalp_merged_hef.nc')
+        cfg.PATHS['dem_file'] = get_demo_file('hef_srtm.tif')
+        cfg.PARAMS['use_intersects'] = False
+        cfg.PARAMS['use_multiple_flowlines'] = False
+
+    def tearDown(self):
+        self.rm_dir()
+
+    def rm_dir(self):
+        shutil.rmtree(self.testdir)
+
+    def clean_dir(self):
+        shutil.rmtree(self.testdir)
+        os.makedirs(self.testdir)
+
+    def test_invert(self):
+
+        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
+        entity = gpd.GeoDataFrame.from_file(hef_file).iloc[0]
+
+        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
+        gis.define_glacier_region(gdir, entity=entity)
+        gis.glacier_masks(gdir)
+        centerlines.compute_centerlines(gdir)
+        centerlines.initialize_flowlines(gdir)
+        centerlines.catchment_area(gdir)
+        centerlines.catchment_width_geom(gdir)
+        centerlines.catchment_width_correction(gdir)
+        climate.apparent_mb_from_linear_mb(gdir)
+        inversion.prepare_for_inversion(gdir, invert_all_rectangular=True)
+        v1, _ = inversion.mass_conservation_inversion(gdir, fs=0, glen_a=cfg.A)
+        tt1 = gdir.read_pickle('inversion_input')[0]
+        gdir1 = gdir
+
+        fl = gdir.read_pickle('inversion_flowlines')[0]
+        map_dx = gdir.grid.dx
+        gdir = utils.idealized_gdir(fl.surface_h,
+                                    fl.widths * map_dx,
+                                    map_dx,
+                                    flowline_dx=fl.dx,
+                                    base_dir=self.testdir)
+        climate.apparent_mb_from_linear_mb(gdir)
+        inversion.prepare_for_inversion(gdir, invert_all_rectangular=True)
+        v2, _ = inversion.mass_conservation_inversion(gdir, fs=0, glen_a=cfg.A)
+
+        tt2 = gdir.read_pickle('inversion_input')[0]
+        np.testing.assert_allclose(tt1['width'], tt2['width'])
+        np.testing.assert_allclose(tt1['slope_angle'], tt2['slope_angle'])
+        np.testing.assert_allclose(tt1['dx'], tt2['dx'])
+        np.testing.assert_allclose(tt1['flux_a0'], tt2['flux_a0'])
+        np.testing.assert_allclose(v1, v2)
+        np.testing.assert_allclose(gdir1.rgi_area_km2, gdir.rgi_area_km2)
+
+
 class TestCatching(unittest.TestCase):
 
     def setUp(self):
@@ -2141,8 +2243,8 @@ class TestCatching(unittest.TestCase):
         gis.glacier_masks(gdir)
 
         # This will "run" but log an error
-        from oggm.tasks import random_glacier_evolution
-        workflow.execute_entity_task(random_glacier_evolution,
+        from oggm.tasks import run_random_climate
+        workflow.execute_entity_task(run_random_climate,
                                      [(gdir, {'filesuffix':'_testme'})])
 
         tfile = os.path.join(self.log_dir, 'RGI40-11.00897.ERROR')
@@ -2152,7 +2254,7 @@ class TestCatching(unittest.TestCase):
 
         spl = first_line.split(';')
         assert len(spl) == 4
-        assert spl[1].strip() == 'random_glacier_evolution_testme'
+        assert spl[1].strip() == 'run_random_climate_testme'
 
     def test_task_status(self):
 
