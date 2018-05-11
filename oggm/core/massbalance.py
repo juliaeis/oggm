@@ -284,7 +284,7 @@ class PastMassBalance(MassBalanceModel):
         fac = 1 - (temp - self.t_solid) / (self.t_liq - self.t_solid)
         prcpsol = prcp * np.clip(fac, 0, 1)
 
-        return temp, tempformelt, prcp, prcpsol
+        return (temp, tempformelt, prcp, prcpsol)
 
     def get_monthly_mb(self, heights, year=None):
 

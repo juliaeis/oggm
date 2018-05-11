@@ -584,7 +584,9 @@ class  FlowlineModel(object):
 
         while self.t < t:
             #print(self.fls[-1].thick)
+            print(t-self.t)
             self.step_back(t-self.t)
+            '''
             if np.max(self.fls[-1].thick)>1e10:
                 #print('smooth')
 
@@ -608,16 +610,18 @@ class  FlowlineModel(object):
 
                 self.fls[-1].section = filt_section
                 #print(self.fls[-1].section)
+            '''
 
         # Check for domain bounds
         if self.check_for_boundaries:
             if self.fls[-1].thick[-1] > 10:
                     raise RuntimeError('Glacier exceeds domain boundaries.')
-
+        '''
         # Check for NaNs
         for fl in self.fls:
             if np.any(~np.isfinite(fl.thick)):
                 raise FloatingPointError('NaN in numerical solution.')
+        '''
 
     def run_until(self, y1):
 
@@ -635,6 +639,7 @@ class  FlowlineModel(object):
         for fl in self.fls:
             if np.any(~np.isfinite(fl.thick)):
                 raise FloatingPointError('NaN in numerical solution.')
+
 
     def run_until_and_store(self, y1, run_path=None, diag_path=None):
         """Runs the model and returns intermediate steps in xarray datasets.
