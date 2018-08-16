@@ -5,6 +5,8 @@ import os
 import shutil
 import time
 import gzip
+import bz2
+import pytest
 
 import salem
 import numpy as np
@@ -15,10 +17,12 @@ from numpy.testing import assert_array_equal, assert_allclose
 import oggm
 from oggm import utils
 from oggm import cfg
-from oggm.tests import is_download
 from oggm.tests.funcs import get_test_dir, patch_url_retrieve_github, init_hef
-
+from oggm.utils import shape_factor_adhikari
 _url_retrieve = None
+
+
+pytestmark = pytest.mark.test_env("utils")
 
 
 def setup_module(module):
@@ -218,6 +222,19 @@ class TestFuncs(unittest.TestCase):
         assert len(reg_names) == 20
         assert reg_names.loc[3].values[0] == 'Arctic Canada North'
 
+    def test_adhikari_shape_factors(self):
+        factors_rectangular = np.array([0.2, 0.313, 0.558, 0.790,
+                                        0.884, 0.929, 0.954, 0.990, 1.])
+        factors_parabolic = np.array([0.2, 0.251, 0.448, 0.653,
+                                      0.748, 0.803, 0.839, 0.917, 1.])
+        w = np.array([0.1, 0.5, 1, 2, 3, 4, 5, 10, 50])
+        h = 0.5 * np.ones(w.shape)
+        is_rect = h.copy()
+        np.testing.assert_equal(shape_factor_adhikari(w, h, is_rect),
+                                factors_rectangular)
+        np.testing.assert_equal(shape_factor_adhikari(w, h, is_rect*0.),
+                                factors_parabolic)
+
 
 class TestInitialize(unittest.TestCase):
 
@@ -265,14 +282,13 @@ class TestWorkflowTools(unittest.TestCase):
         df = utils.glacier_characteristics([gdir], path=False)
         assert len(df) == 1
         assert np.all(~df.isnull())
-        assert len(df.columns) >= 36
         df = df.iloc[0]
         np.testing.assert_allclose(df['dem_mean_elev'],
                                    df['flowline_mean_elev'], atol=5)
         np.testing.assert_allclose(df['tstar_avg_prcp'],
-                                   2811, atol=5)
+                                   2853, atol=5)
         np.testing.assert_allclose(df['tstar_avg_prcpsol_max_elev'],
-                                   2811, atol=50)
+                                   2811, atol=5)
 
 
 def touch(path):
@@ -400,21 +416,19 @@ class TestFakeDownloads(unittest.TestCase):
     def test_rgi_intersects(self):
 
         # Make a fake RGI file
-        rgi_dir = os.path.join(self.dldir, 'rgi50')
+        rgi_dir = os.path.join(self.dldir, 'RGI_V50_Intersects')
         utils.mkdir(rgi_dir)
-        make_fake_zipdir(os.path.join(rgi_dir, 'RGI_V5_Intersects'),
+        make_fake_zipdir(os.path.join(rgi_dir),
                          fakefile='Intersects_OGGM_Manifest.txt')
-        make_fake_zipdir(os.path.join(rgi_dir, 'RGI_V5_Intersects',
-                                      '11_rgi50_CentralEurope'),
+        make_fake_zipdir(os.path.join(rgi_dir, '11_rgi50_CentralEurope'),
                          fakefile='intersects_11_rgi50_CentralEurope.shp')
-        make_fake_zipdir(os.path.join(rgi_dir, 'RGI_V5_Intersects',
-                                      '00_rgi50_AllRegs'),
+        make_fake_zipdir(os.path.join(rgi_dir, '00_rgi50_AllRegs'),
                          fakefile='intersects_rgi50_AllRegs.shp')
         rgi_f = make_fake_zipdir(rgi_dir)
 
         def down_check(url, cache_name=None, reset=False):
             expected = ('https://cluster.klima.uni-bremen.de/~fmaussion/rgi/' +
-                        'RGI_V5_Intersects.zip')
+                        'RGI_V50_Intersects.zip')
             self.assertEqual(url, expected)
             return rgi_f
 
@@ -428,15 +442,15 @@ class TestFakeDownloads(unittest.TestCase):
                                            'Intersects_OGGM_Manifest.txt'))
 
         # Make a fake RGI file
-        rgi_dir = os.path.join(self.dldir, 'rgi60')
+        rgi_dir = os.path.join(self.dldir, 'RGI_V60_Intersects')
         utils.mkdir(rgi_dir)
-        make_fake_zipdir(os.path.join(rgi_dir, 'RGI_V6_Intersects'),
+        make_fake_zipdir(os.path.join(rgi_dir),
                          fakefile='Intersects_OGGM_Manifest.txt')
         rgi_f = make_fake_zipdir(rgi_dir)
 
         def down_check(url, cache_name=None, reset=False):
             expected = ('https://cluster.klima.uni-bremen.de/~fmaussion/rgi/' +
-                        'RGI_V6_Intersects.zip')
+                        'RGI_V60_Intersects.zip')
             self.assertEqual(url, expected)
             return rgi_f
 
@@ -466,6 +480,24 @@ class TestFakeDownloads(unittest.TestCase):
 
         assert os.path.exists(tf)
 
+    def test_histalp(self):
+
+        # Create fake histalp file
+        cf = os.path.join(self.dldir, 'HISTALP_temperature_1780-2014.nc.bz2')
+        with bz2.open(cf, 'wb') as gz:
+            gz.write(b'dummy')
+
+        def down_check(url, cache_name=None, reset=False):
+            expected = ('http://www.zamg.ac.at/histalp/download/grid5m/'
+                        'HISTALP_temperature_1780-2014.nc.bz2')
+            self.assertEqual(url, expected)
+            return cf
+
+        with FakeDownloadManager('_progress_urlretrieve', down_check):
+            tf = utils.get_histalp_file('tmp')
+
+        assert os.path.exists(tf)
+
     def test_srtm(self):
 
         # Make a fake topo file
@@ -473,7 +505,8 @@ class TestFakeDownloads(unittest.TestCase):
                               fakefile='srtm_39_03.tif')
 
         def down_check(url, cache_name=None, reset=False):
-            expected = 'http://droppr.org/srtm/v4.1/6_5x5_TIFs/srtm_39_03.zip'
+            expected = 'http://srtm.csi.cgiar.org/SRT-ZIP/SRTM_V41/' + \
+              'SRTM_Data_GeoTiff/srtm_39_03.zip'
             self.assertEqual(url, expected)
             return tf
 
@@ -506,9 +539,10 @@ class TestFakeDownloads(unittest.TestCase):
             self.assertEqual(url, expected)
             return 'yo'
 
-        with FakeDownloadManager('_download_alternate_topo_file', down_check):
+        with FakeDownloadManager('_download_topo_file_from_cluster', down_check):
             of, source = utils.get_topo_file([-120.2, -120.2], [-88, -88],
-                                             rgi_region=19)
+                                             rgi_region='19',
+                                             rgi_subregion='19-11')
 
         assert of[0] == 'yo'
         assert source == 'RAMP'
@@ -516,11 +550,11 @@ class TestFakeDownloads(unittest.TestCase):
     def test_gimp(self):
 
         def down_check(url):
-            expected = 'gimpdem_90m.tif'
+            expected = 'gimpdem_90m_v01.1.tif'
             self.assertEqual(url, expected)
             return 'yo'
 
-        with FakeDownloadManager('_download_alternate_topo_file', down_check):
+        with FakeDownloadManager('_download_topo_file_from_cluster', down_check):
             of, source = utils.get_topo_file([-120.2, -120.2], [-88, -88],
                                              rgi_region=5)
 
@@ -572,7 +606,7 @@ class TestDataFiles(unittest.TestCase):
 
     def test_download_demo_files(self):
 
-        f = utils.get_demo_file('Hintereisferner.shp')
+        f = utils.get_demo_file('Hintereisferner_RGI5.shp')
         self.assertTrue(os.path.exists(f))
 
         sh = salem.read_shapefile(f)
@@ -731,7 +765,7 @@ class TestDataFiles(unittest.TestCase):
         assert os.path.exists(f2)
         assert os.path.exists(f3)
 
-    @is_download
+    @pytest.mark.download
     def test_srtmdownload(self):
 
         # this zone does exist and file should be small enough for download
@@ -741,14 +775,14 @@ class TestDataFiles(unittest.TestCase):
         fp = utils._download_srtm_file(zone)
         self.assertTrue(os.path.exists(fp))
 
-    @is_download
+    @pytest.mark.download
     def test_srtmdownloadfails(self):
 
         # this zone does not exist
         zone = '41_20'
         self.assertTrue(utils._download_srtm_file(zone) is None)
 
-    @is_download
+    @pytest.mark.creds
     def test_asterdownload(self):
 
         # this zone does exist and file should be small enough for download
@@ -757,18 +791,18 @@ class TestDataFiles(unittest.TestCase):
         fp = utils._download_aster_file(zone, unit)
         self.assertTrue(os.path.exists(fp))
 
-    @is_download
+    @pytest.mark.download
     def test_gimp(self):
         fp, z = utils.get_topo_file([], [], rgi_region=5)
         self.assertTrue(os.path.exists(fp[0]))
         self.assertEqual(z, 'GIMP')
 
-    @is_download
+    @pytest.mark.download
     def test_iceland(self):
         fp, z = utils.get_topo_file([-20, -20], [65, 65])
         self.assertTrue(os.path.exists(fp[0]))
 
-    @is_download
+    @pytest.mark.creds
     def test_asterdownloadfails(self):
 
         # this zone does not exist
@@ -776,14 +810,7 @@ class TestDataFiles(unittest.TestCase):
         unit = 'S75E135'
         self.assertTrue(utils._download_aster_file(zone, unit) is None)
 
-    @is_download
-    def test_alternatedownload(self):
-
-        # this is a simple file
-        fp = utils._download_alternate_topo_file('iceland.tif')
-        self.assertTrue(os.path.exists(fp))
-
-    @is_download
+    @pytest.mark.download
     def test_download_cru(self):
 
         tmp = cfg.PATHS['cru_dir']
@@ -794,8 +821,21 @@ class TestDataFiles(unittest.TestCase):
 
         cfg.PATHS['cru_dir'] = tmp
 
-    @is_download
-    def test_download_rgi(self):
+    @pytest.mark.download
+    def test_download_histalp(self):
+
+        tmp = cfg.PATHS['cru_dir']
+        cfg.PATHS['cru_dir'] = os.path.join(self.dldir, 'cru_extract')
+
+        of = utils.get_histalp_file('tmp')
+        self.assertTrue(os.path.exists(of))
+        of = utils.get_histalp_file('pre')
+        self.assertTrue(os.path.exists(of))
+
+        cfg.PATHS['cru_dir'] = tmp
+
+    @pytest.mark.download
+    def test_download_rgi5(self):
 
         tmp = cfg.PATHS['rgi_dir']
         cfg.PATHS['rgi_dir'] = os.path.join(self.dldir, 'rgi_extract')
@@ -806,7 +846,7 @@ class TestDataFiles(unittest.TestCase):
 
         cfg.PATHS['rgi_dir'] = tmp
 
-    @is_download
+    @pytest.mark.download
     def test_download_rgi6(self):
 
         tmp = cfg.PATHS['rgi_dir']
@@ -818,8 +858,20 @@ class TestDataFiles(unittest.TestCase):
 
         cfg.PATHS['rgi_dir'] = tmp
 
-    @is_download
-    def test_download_rgi_intersects(self):
+    @pytest.mark.download
+    def test_download_rgi61(self):
+
+        tmp = cfg.PATHS['rgi_dir']
+        cfg.PATHS['rgi_dir'] = os.path.join(self.dldir, 'rgi_extract')
+
+        of = utils.get_rgi_dir(version='61')
+        of = os.path.join(of, '01_rgi61_Alaska', '01_rgi61_Alaska.shp')
+        self.assertTrue(os.path.exists(of))
+
+        cfg.PATHS['rgi_dir'] = tmp
+
+    @pytest.mark.download
+    def test_download_rgi60_intersects(self):
 
         tmp = cfg.PATHS['rgi_dir']
         cfg.PATHS['rgi_dir'] = os.path.join(self.dldir, 'rgi_extract')
@@ -831,7 +883,20 @@ class TestDataFiles(unittest.TestCase):
 
         cfg.PATHS['rgi_dir'] = tmp
 
-    @is_download
+    @pytest.mark.download
+    def test_download_rgi61_intersects(self):
+
+        tmp = cfg.PATHS['rgi_dir']
+        cfg.PATHS['rgi_dir'] = os.path.join(self.dldir, 'rgi_extract')
+
+        of = utils.get_rgi_intersects_dir(version='61')
+        of = os.path.join(of, '01_rgi61_Alaska',
+                          'intersects_01_rgi61_Alaska.shp')
+        self.assertTrue(os.path.exists(of))
+
+        cfg.PATHS['rgi_dir'] = tmp
+
+    @pytest.mark.download
     def test_download_dem3_viewpano(self):
 
         # this zone does exist and file should be small enough for download
@@ -842,7 +907,7 @@ class TestDataFiles(unittest.TestCase):
         fp = utils._download_dem3_viewpano(zone)
         self.assertTrue(os.path.exists(fp))
 
-    @is_download
+    @pytest.mark.download
     def test_download_dem3_viewpano_fails(self):
 
         # this zone does not exist
@@ -850,7 +915,7 @@ class TestDataFiles(unittest.TestCase):
         fp = utils._download_dem3_viewpano(zone)
         self.assertTrue(fp is None)
 
-    @is_download
+    @pytest.mark.download
     def test_auto_topo(self):
         # Test for combine
         fdem, src = utils.get_topo_file([6, 14], [41, 41])
@@ -864,3 +929,26 @@ class TestDataFiles(unittest.TestCase):
         self.assertEqual(len(fdem), 3)
         for fp in fdem:
             self.assertTrue(os.path.exists(fp))
+
+
+class TestSkyIsFalling(unittest.TestCase):
+
+    def test_projplot(self):
+
+        # this caused many problems on Linux Mint distributions
+        # this is just to be sure that on your system, everything is fine
+        import pyproj
+        import matplotlib.pyplot as plt
+
+        wgs84 = pyproj.Proj(proj='latlong', datum='WGS84')
+        fig = plt.figure()
+        plt.close()
+
+        srs = ('+units=m +proj=lcc +lat_1=29.0 +lat_2=29.0 '
+               '+lat_0=29.0 +lon_0=89.8')
+
+        proj_out = pyproj.Proj("+init=EPSG:4326", preserve_units=True)
+        proj_in = pyproj.Proj(srs, preserve_units=True)
+
+        lon, lat = pyproj.transform(proj_in, proj_out, -2235000, -2235000)
+        np.testing.assert_allclose(lon, 70.75731, atol=1e-5)

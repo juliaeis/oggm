@@ -6,6 +6,8 @@ import glob
 import os
 import tempfile
 import gzip
+import bz2
+import json
 import shutil
 import zipfile
 import sys
@@ -22,8 +24,6 @@ import fnmatch
 import platform
 import struct
 import importlib
-from urllib.request import urlretrieve
-from urllib.error import HTTPError, ContentTooShortError
 from urllib.parse import urlparse
 
 # External libs
@@ -34,13 +34,13 @@ from salem import lazy_property, read_shapefile
 import numpy as np
 import netCDF4
 from scipy import stats
-from joblib import Memory
 from shapely.ops import transform as shp_trafo
 from salem import wgs84
 import xarray as xr
 import rasterio
 from scipy.ndimage import filters
 from scipy.signal import gaussian
+from scipy.interpolate import interp1d
 import shapely.geometry as shpg
 from shapely.ops import linemerge
 try:
@@ -49,6 +49,7 @@ try:
 except ImportError:
     from rasterio.tools.merge import merge as merge_tool
 import multiprocessing as mp
+import requests
 
 try:
     ModuleNotFoundError
@@ -66,10 +67,12 @@ logger = logging.getLogger(__name__)
 # Github repository and commit hash/branch name/tag name on that repository
 # The given commit will be downloaded from github and used as source for all sample data
 SAMPLE_DATA_GH_REPO = 'OGGM/oggm-sample-data'
-SAMPLE_DATA_COMMIT = '5e15bb8c19191950b3ea0dbfe87d0d68e15aedc9'
+SAMPLE_DATA_COMMIT = 'a0bc38e2f5fde2452f50d62824bdb8c21859f8a4'
 
 CRU_SERVER = ('https://crudata.uea.ac.uk/cru/data/hrg/cru_ts_4.01/cruts'
               '.1709081022.v4.01/')
+
+HISTALP_SERVER = 'http://www.zamg.ac.at/histalp/download/grid5m/'
 
 _RGI_METADATA = dict()
 
@@ -93,14 +96,26 @@ DEM3REG = {
     # 'GL-East': [-42., -17., 64., 76.]
 }
 
-# Joblib
-MEMORY = Memory(cachedir=cfg.CACHE_DIR, verbose=0)
-
 # Function
 tuple2int = partial(np.array, dtype=np.int64)
 
 # Global Lock
 lock = mp.Lock()
+
+# Shape factors
+# TODO: how to handle zeta > 10? at the moment extrapolation
+# Table 1 from Adhikari (2012) and corresponding interpolation functions
+_ADHIKARI_TABLE_ZETAS = np.array([0.5, 1, 2, 3, 4, 5, 10])
+_ADHIKARI_TABLE_RECTANGULAR = np.array([0.313, 0.558, 0.790, 0.884,
+                                0.929, 0.954, 0.990])
+_ADHIKARI_TABLE_PARABOLIC = np.array([0.251, 0.448, 0.653, 0.748,
+                              0.803, 0.839, 0.917])
+ADHIKARI_FACTORS_RECTANGULAR = interp1d(_ADHIKARI_TABLE_ZETAS,
+                                        _ADHIKARI_TABLE_RECTANGULAR,
+                                        fill_value='extrapolate')
+ADHIKARI_FACTORS_PARABOLIC = interp1d(_ADHIKARI_TABLE_ZETAS,
+                                      _ADHIKARI_TABLE_PARABOLIC,
+                                      fill_value='extrapolate')
 
 
 def _get_download_lock():
@@ -108,6 +123,15 @@ def _get_download_lock():
 
 
 class NoInternetException(Exception):
+    pass
+
+
+class HttpDownloadError(Exception):
+    def __init__(self, code):
+        self.code = code
+
+
+class HttpContentTooShortError(Exception):
     pass
 
 
@@ -125,7 +149,11 @@ def _cached_download_helper(cache_obj_name, dl_func, reset=False):
     """
     cache_dir = cfg.PATHS['dl_cache_dir']
     cache_ro = cfg.PARAMS['dl_cache_readonly']
-    fb_cache_dir = os.path.join(cfg.PATHS['working_dir'], 'cache')
+    try:
+        # this is for real runs
+        fb_cache_dir = os.path.join(cfg.PATHS['working_dir'], 'cache')
+    except KeyError:
+        fb_cache_dir = ''
 
     if not cache_dir:
         # Defaults to working directory: it must be set!
@@ -161,7 +189,38 @@ def _cached_download_helper(cache_obj_name, dl_func, reset=False):
     return cache_path
 
 
-def _urlretrieve(url, cache_obj_name=None, reset=False, *args, **kwargs):
+def _requests_urlretrieve(url, path, reporthook):
+    """Implements the required features of urlretrieve on top of requests
+    """
+
+    chunk_size = 128 * 1024
+    chunk_count = 0
+
+    with requests.get(url, stream=True) as r:
+        if r.status_code != 200:
+            raise HttpDownloadError(r.status_code)
+        r.raise_for_status()
+
+        size = r.headers.get('content-length') or 0
+        size = int(size)
+
+        if reporthook:
+            reporthook(chunk_count, chunk_size, size)
+
+        with open(path, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=chunk_size):
+                if not chunk:
+                    continue
+                f.write(chunk)
+                chunk_count += 1
+                if reporthook:
+                    reporthook(chunk_count, chunk_size, size)
+
+        if chunk_count * chunk_size < size:
+            raise HttpContentTooShortError()
+
+
+def _urlretrieve(url, cache_obj_name=None, reset=False, reporthook=None):
     """Wrapper around urlretrieve, to implement our caching logic.
 
     Instead of accepting a destination path, it decided where to store the file
@@ -174,7 +233,7 @@ def _urlretrieve(url, cache_obj_name=None, reset=False, *args, **kwargs):
 
     def _dlf(cache_path):
         logger.info("Downloading %s to %s..." % (url, cache_path))
-        urlretrieve(url, cache_path, *args, **kwargs)
+        _requests_urlretrieve(url, cache_path, reporthook)
         return cache_path
 
     return _cached_download_helper(cache_obj_name, _dlf, reset)
@@ -260,7 +319,7 @@ def file_downloader(www_path, retry_max=5, cache_name=None, reset=False):
                                                reset=reset)
             # if no error, exit
             break
-        except HTTPError as err:
+        except HttpDownloadError as err:
             # This works well for py3
             if err.code == 404:
                 # Ok so this *should* be an ocean tile
@@ -273,7 +332,7 @@ def file_downloader(www_path, retry_max=5, cache_name=None, reset=False):
                 continue
             else:
                 raise
-        except ContentTooShortError:
+        except HttpContentTooShortError:
             logger.info("Downloading %s failed with ContentTooShortError"
                         " error %s, retrying in 10 seconds... %s/%s" %
                         (www_path, err.code, retry_counter, retry_max))
@@ -544,7 +603,8 @@ def _download_srtm_file_unlocked(zone):
         return outpath
 
     # Did we download it yet?
-    wwwfile = 'http://droppr.org/srtm/v4.1/6_5x5_TIFs/srtm_' + zone + '.zip'
+    wwwfile = 'http://srtm.csi.cgiar.org/SRT-ZIP/SRTM_V41/' +\
+        'SRTM_Data_GeoTiff/srtm_' + zone + '.zip'
     dest_file = file_downloader(wwwfile)
 
     # None means we tried hard but we couldn't find it
@@ -689,22 +749,14 @@ def _download_aster_file_unlocked(zone, unit):
     return outpath
 
 
-def _download_alternate_topo_file(fname):
+def _download_topo_file_from_cluster(fname):
     with _get_download_lock():
-        return _download_alternate_topo_file_unlocked(fname)
+        return _download_topo_file_from_cluster_unlocked(fname)
 
 
-def _download_alternate_topo_file_unlocked(fname):
+def _download_topo_file_from_cluster_unlocked(fname):
     """Checks if the special topo data is in the directory and if not,
-    download it from AWS.
-
-    You need AWS cli and AWS credentials for this. Quoting Timo:
-
-        $ aws configure
-
-        Key ID und Secret you should have
-        Region is eu-west-1 and Output Format is json.
-
+    download it from the cluster.
     """
 
     # extract directory
@@ -712,8 +764,9 @@ def _download_alternate_topo_file_unlocked(fname):
     mkdir(tmpdir)
     outpath = os.path.join(tmpdir, fname)
 
-    aws_path = 'topo/' + fname + '.zip'
-    dfile = _aws_file_download_unlocked(aws_path)
+    url = 'https://cluster.klima.uni-bremen.de/~fmaussion/dems/'
+    url += fname + '.zip'
+    dfile = file_downloader(url)
 
     if not os.path.exists(outpath):
         logger.info('Extracting ' + fname + '.zip to ' + outpath + '...')
@@ -850,9 +903,9 @@ def haversine(lon1, lat1, lon2, lat2):
     Examples:
     ---------
     >>> haversine(34, 42, 35, 42)
-    82633.464752871543
+    82633.46475287154
     >>> haversine(34, 42, [35, 36], [42, 42])
-    array([  82633.46475287,  165264.11172113])
+    array([ 82633.46475287, 165264.11172113])
     """
 
     # convert decimal degrees to radians
@@ -863,8 +916,7 @@ def haversine(lon1, lat1, lon2, lat2):
     dlat = lat2 - lat1
     a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2)**2
     c = 2 * np.arcsin(np.sqrt(a))
-    r = 6371000 # Radius of earth in meters
-    return c * r
+    return c * 6371000  # Radius of earth in meters
 
 
 def interp_nans(array, default=None):
@@ -1254,37 +1306,11 @@ def monthly_timeseries(y0, y1=None, ny=None, include_last_year=False):
     return out
 
 
-@MEMORY.cache
-def joblib_read_climate(ncpath, ilon, ilat, default_grad, minmax_grad,
-                        use_grad):
-    """Prevent to re-compute a timeserie if it was done before.
-
-    TODO: dirty solution, should be replaced by proper input.
-    """
-
-    # read the file and data
-    with netCDF4.Dataset(ncpath, mode='r') as nc:
-        temp = nc.variables['temp']
-        prcp = nc.variables['prcp']
-        hgt = nc.variables['hgt']
-        igrad = np.zeros(len(nc.dimensions['time'])) + default_grad
-        ttemp = temp[:, ilat-1:ilat+2, ilon-1:ilon+2]
-        itemp = ttemp[:, 1, 1]
-        thgt = hgt[ilat-1:ilat+2, ilon-1:ilon+2]
-        ihgt = thgt[1, 1]
-        thgt = thgt.flatten()
-        iprcp = prcp[:, ilat, ilon]
-
-    # Now the gradient
-    if use_grad:
-        for t, loct in enumerate(ttemp):
-            slope, _, _, p_val, _ = stats.linregress(thgt,
-                                                     loct.flatten())
-            igrad[t] = slope if (p_val < 0.01) else default_grad
-        # dont exagerate too much
-        igrad = np.clip(igrad, minmax_grad[0], minmax_grad[1])
-
-    return iprcp, itemp, igrad, ihgt
+class ncDataset(netCDF4.Dataset):
+    """Wrapper around netCDF4 setting auto_mask to False"""
+    def __init__(self, *args, **kwargs):
+        super(ncDataset, self).__init__(*args, **kwargs)
+        self.set_auto_mask(False)
 
 
 def pipe_log(gdir, task_func_name, err=None):
@@ -1547,16 +1573,13 @@ def get_cru_cl_file():
         return fpath
 
 
-def get_wgms_files(version=None):
+def get_wgms_files():
     """Get the path to the default WGMS-RGI link file and the data dir.
 
     Returns
     -------
     (file, dir): paths to the files
     """
-
-    if version is None:
-        version = cfg.PARAMS['rgi_version']
 
     download_oggm_files()
     sdir = os.path.join(cfg.CACHE_DIR,
@@ -1587,7 +1610,7 @@ def get_glathida_file():
     return outf
 
 
-def get_rgi_dir(version=None):
+def get_rgi_dir(version=None, reset=False):
     """Returns a path to the RGI directory.
 
     If the RGI files are not present, download them.
@@ -1605,14 +1628,17 @@ def get_rgi_dir(version=None):
     """
 
     with _get_download_lock():
-        return _get_rgi_dir_unlocked(version=version)
+        return _get_rgi_dir_unlocked(version=version, reset=reset)
 
 
-def _get_rgi_dir_unlocked(version=None):
+def _get_rgi_dir_unlocked(version=None, reset=False):
 
     rgi_dir = cfg.PATHS['rgi_dir']
     if version is None:
         version = cfg.PARAMS['rgi_version']
+
+    if len(version) == 1:
+        version += '0'
 
     # Be sure the user gave a sensible path to the RGI dir
     if not rgi_dir:
@@ -1620,24 +1646,26 @@ def _get_rgi_dir_unlocked(version=None):
                          'specified explicitly.')
     rgi_dir = os.path.abspath(os.path.expanduser(rgi_dir))
     rgi_dir = os.path.join(rgi_dir, 'RGIV' + version)
-    mkdir(rgi_dir)
+    mkdir(rgi_dir, reset=reset)
 
-    if version == '5':
+    if version == '50':
         dfile = 'http://www.glims.org/RGI/rgi50_files/rgi50.zip'
-    else:
+    elif version == '60':
         dfile = 'http://www.glims.org/RGI/rgi60_files/00_rgi60.zip'
+    elif version == '61':
+        dfile = 'https://cluster.klima.uni-bremen.de/~fmaussion/rgi/rgi_61.zip'
 
     test_file = os.path.join(rgi_dir,
-                             '000_rgi{}0_manifest.txt'.format(version))
+                             '*_rgi*{}_manifest.txt'.format(version))
 
-    if not os.path.exists(test_file):
+    if len(glob.glob(test_file)) == 0:
         # if not there download it
-        ofile = file_downloader(dfile)
+        ofile = file_downloader(dfile, reset=reset)
         # Extract root
         with zipfile.ZipFile(ofile) as zf:
             zf.extractall(rgi_dir)
         # Extract subdirs
-        pattern = '*_rgi{}0_*.zip'.format(version)
+        pattern = '*_rgi{}_*.zip'.format(version)
         for root, dirs, files in os.walk(cfg.PATHS['rgi_dir']):
             for filename in fnmatch.filter(files, pattern):
                 zfile = os.path.join(root, filename)
@@ -1647,10 +1675,13 @@ def _get_rgi_dir_unlocked(version=None):
                     zf.extractall(ex_root)
                 # delete the zipfile after success
                 os.remove(zfile)
+        if len(glob.glob(test_file)) == 0:
+            raise RuntimeError('Could not find a manifest file in the RGI '
+                               'directory: ' + rgi_dir)
     return rgi_dir
 
 
-def get_rgi_region_file(region, version=None):
+def get_rgi_region_file(region, version=None, reset=False):
     """Returns a path to a RGI region file.
 
     If the RGI files are not present, download them.
@@ -1667,10 +1698,42 @@ def get_rgi_region_file(region, version=None):
     path to the RGI shapefile
     """
 
-    rgi_dir = get_rgi_dir(version=version)
+    rgi_dir = get_rgi_dir(version=version, reset=reset)
     f = list(glob.glob(rgi_dir + "/*/{}_*.shp".format(region)))
     assert len(f) == 1
     return f[0]
+
+
+def get_rgi_glacier_entities(rgi_ids, version=None):
+    """A convenience function to get a GeoDataframe for a list of glacier IDs.
+
+    Parameters
+    ----------
+    rgi_ids: list of str
+        the glaciers you want the outlines for
+    version: list of str
+        the rgi version
+
+    Returns
+    -------
+    a geodataframe with the list of glaciers
+    """
+
+    regions = [s.split('-')[1].split('.')[0] for s in rgi_ids]
+    if version is None:
+        version = rgi_ids[0].split('-')[0][-2:]
+    selection = []
+    for reg in sorted(np.unique(regions)):
+        sh = gpd.read_file(get_rgi_region_file(reg, version=version))
+        selection.append(sh.loc[sh.RGIId.isin(rgi_ids)])
+
+    # Make a new dataframe of those
+    selection = pd.concat(selection)
+    selection.crs = sh.crs  # for geolocalisation
+    if len(selection) != len(rgi_ids):
+        raise RuntimeError('Could not find all RGI ids')
+
+    return selection
 
 
 def get_rgi_intersects_dir(version=None, reset=False):
@@ -1693,33 +1756,65 @@ def _get_rgi_intersects_dir_unlocked(version=None, reset=False):
     if version is None:
         version = cfg.PARAMS['rgi_version']
 
+    if len(version) == 1:
+        version += '0'
+
     # Be sure the user gave a sensible path to the RGI dir
     if not rgi_dir:
         raise ValueError('The RGI data directory has to be'
                          'specified explicitly.')
 
     rgi_dir = os.path.abspath(os.path.expanduser(rgi_dir))
-    mkdir(rgi_dir, reset=reset)
+    mkdir(rgi_dir)
 
     dfile = 'https://cluster.klima.uni-bremen.de/~fmaussion/rgi/'
-    if version == '5':
-        dfile += 'RGI_V5_Intersects.zip'
-    elif version == '6':
-        dfile += 'RGI_V6_Intersects.zip'
+    dfile += 'RGI_V{}_Intersects.zip'.format(version)
 
-    test_file = os.path.join(rgi_dir, 'RGI_V' + version + '_Intersects',
-                             'Intersects_OGGM_Manifest.txt')
-    if not os.path.exists(test_file):
-        # if not there download it
-        ofile = file_downloader(dfile, reset=reset)
-        # Extract root
-        with zipfile.ZipFile(ofile) as zf:
-            zf.extractall(rgi_dir)
+    odir = os.path.join(rgi_dir, 'RGI_V' + version + '_Intersects')
+    if reset and os.path.exists(odir):
+        shutil.rmtree(odir)
 
-    return os.path.join(rgi_dir, 'RGI_V' + version + '_Intersects')
+    # A lot of code for backwards compat (sigh...)
+    if version in ['50', '60']:
+        test_file = os.path.join(odir, 'Intersects_OGGM_Manifest.txt')
+        if not os.path.exists(test_file):
+            # if not there download it
+            ofile = file_downloader(dfile, reset=reset)
+            # Extract root
+            with zipfile.ZipFile(ofile) as zf:
+                zf.extractall(odir)
+            if not os.path.exists(test_file):
+                raise RuntimeError('Could not find a manifest file in the RGI '
+                                   'directory: ' + odir)
+    else:
+        test_file = os.path.join(odir,
+                                 '*ntersect*anifest.txt'.format(version))
+        if len(glob.glob(test_file)) == 0:
+            # if not there download it
+            ofile = file_downloader(dfile, reset=reset)
+            # Extract root
+            with zipfile.ZipFile(ofile) as zf:
+                zf.extractall(odir)
+            # Extract subdirs
+            pattern = '*_rgi{}_*.zip'.format(version)
+            for root, dirs, files in os.walk(cfg.PATHS['rgi_dir']):
+                for filename in fnmatch.filter(files, pattern):
+                    zfile = os.path.join(root, filename)
+                    with zipfile.ZipFile(zfile) as zf:
+                        ex_root = zfile.replace('.zip', '')
+                        mkdir(ex_root)
+                        zf.extractall(ex_root)
+                    # delete the zipfile after success
+                    os.remove(zfile)
+            if len(glob.glob(test_file)) == 0:
+                raise RuntimeError('Could not find a manifest file in the RGI '
+                                   'directory: ' + odir)
+
+    return odir
 
 
-def get_rgi_intersects_region_file(region, version=None):
+def get_rgi_intersects_region_file(region='00', version=None, rgi_ids=None,
+                                   reset=False):
     """Returns a path to a RGI regional intersect file.
 
     If the RGI files are not present, download them. Setting region=00 gives
@@ -1728,19 +1823,51 @@ def get_rgi_intersects_region_file(region, version=None):
     Parameters
     ----------
     region: str
-        from '00' to '19'
+        from '00' to '19', with '00' being the global file. From RGI version
+        '61' onwards, '00' will require `rgi_ids` to be set for more clever
+        handling.
     version: str
-        '5', '6', defaults to None (linking to the one specified in cfg.params)
+        '5', '6', '61'... defaults the one specified in cfg.params
+    rgi_ids: list, optional
+        list of rgi_ids you want to look for intersections for
+    reset: bool
+        redownload the RGI file.
 
     Returns
     -------
-    path to the RGI shapefile
+    path to the RGI shapefile or shapefile itself (if rgi_id is set)
     """
 
-    rgi_dir = get_rgi_intersects_dir(version=version)
+    if version is None:
+        version = cfg.PARAMS['rgi_version']
+    if len(version) == 1:
+        version += '0'
+
+    rgi_dir = get_rgi_intersects_dir(version=version, reset=reset)
+
+    if rgi_ids is not None:
+        regions = [s.split('-')[1].split('.')[0] for s in rgi_ids]
+        selection = []
+        for reg in sorted(np.unique(regions)):
+            sh = gpd.read_file(get_rgi_intersects_region_file(reg,
+                                                              version=version))
+            selection.append(sh.loc[sh.RGIId_1.isin(rgi_ids) |
+                                    sh.RGIId_2.isin(rgi_ids)])
+
+        # Make a new dataframe of those
+        selection = pd.concat(selection)
+        selection.crs = sh.crs  # for geolocalisation
+
+        return selection
+
+    # Else, regular workflow
     if region == '00':
-        version = 'AllRegs'
-        region = '*'
+        if version in ['50', '60']:
+            version = 'AllRegs'
+            region = '*'
+        else:
+            raise ValueError("From RGI version 61 onwards, please specify "
+                             "`rgi_ids` with `region=='00'`")
     f = list(glob.glob(os.path.join(rgi_dir, "*", '*intersects*' + region +
                                     '_rgi*' + version + '*.shp')))
     assert len(f) == 1
@@ -1801,7 +1928,65 @@ def _get_cru_file_unlocked(var=None):
     return ofile
 
 
-def get_topo_file(lon_ex, lat_ex, rgi_region=None, source=None):
+def get_histalp_file(var=None):
+    """Returns a path to the desired HISTALP file.
+
+    If the file is not present, download it.
+
+    Parameters
+    ----------
+    var: 'tmp' or 'pre'
+
+    Returns
+    -------
+    path to the CRU file
+    """
+    with _get_download_lock():
+        return _get_histalp_file_unlocked(var)
+
+
+def _get_histalp_file_unlocked(var=None):
+
+    cru_dir = cfg.PATHS['cru_dir']
+
+    # Be sure the user gave a sensible path to the climate dir
+    if not cru_dir:
+        raise ValueError('The CRU data directory has to be'
+                         'specified explicitly.')
+    cru_dir = os.path.abspath(os.path.expanduser(cru_dir))
+    mkdir(cru_dir)
+
+    # Be sure input makes sense
+    if var not in ['tmp', 'pre']:
+        raise ValueError('HISTALP variable {} does not exist!'.format(var))
+
+    # File to look for
+    if var == 'tmp':
+        bname = 'HISTALP_temperature_1780-2014.nc'
+    else:
+        bname = 'HISTALP_precipitation_all_abs_1801-2014.nc'
+
+    search = glob.glob(os.path.join(cru_dir, bname))
+    if len(search) == 1:
+        ofile = search[0]
+    elif len(search) > 1:
+        raise RuntimeError('You seem to have more than one matching file in '
+                           'your CRU directory: {}. Help me by deleting the '
+                           'one you dont want to use anymore.'.format(cru_dir))
+    else:
+        # if not there download it
+        h_url = HISTALP_SERVER + bname + '.bz2'
+        dlfile = file_downloader(h_url)
+        ofile = os.path.join(cru_dir, bname)
+        with bz2.BZ2File(dlfile) as zf:
+            with open(ofile, 'wb') as outfile:
+                for line in zf:
+                    outfile.write(line)
+    return ofile
+
+
+def get_topo_file(lon_ex, lat_ex, rgi_region=None, rgi_subregion=None,
+                  source=None):
     """
     Returns a list with path(s) to the DEM file(s) covering the desired extent.
 
@@ -1819,8 +2004,10 @@ def get_topo_file(lon_ex, lat_ex, rgi_region=None, source=None):
         a (min_lon, max_lon) tuple delimiting the requested area longitudes
     lat_ex : tuple, required
         a (min_lat, max_lat) tuple delimiting the requested area latitudes
-    rgi_region : int, optional
+    rgi_region : str, optional
         the RGI region number (required for the GIMP DEM)
+    rgi_subregion : str, optional
+        the RGI subregion str (useful for RGI Reg 19)
     source : str or list of str, optional
         If you want to force the use of a certain DEM source. Available are:
           - 'USER' : file set in cfg.PATHS['dem_file']
@@ -1840,6 +2027,7 @@ def get_topo_file(lon_ex, lat_ex, rgi_region=None, source=None):
         for s in source:
             demf, source_str = get_topo_file(lon_ex, lat_ex,
                                              rgi_region=rgi_region,
+                                             rgi_subregion=rgi_subregion,
                                              source=s)
             if demf[0]:
                 return demf, source_str
@@ -1856,18 +2044,23 @@ def get_topo_file(lon_ex, lat_ex, rgi_region=None, source=None):
     if source == 'GIMP' or (rgi_region is not None and int(rgi_region) == 5):
         source = 'GIMP' if source is None else source
         if source == 'GIMP':
-            _file = _download_alternate_topo_file('gimpdem_90m.tif')
+            _file = _download_topo_file_from_cluster('gimpdem_90m_v01.1.tif')
             return [_file], source
 
     # Same for Antarctica
     if source == 'RAMP' or (rgi_region is not None and int(rgi_region) == 19):
-        if np.max(lat_ex) > -60:
+        if rgi_subregion is None:
+            raise ValueError('Must specify subregion for Antarctica')
+        else:
+            dem3_regs = ['19-01', '19-02', '19-03', '19-04', '19-05']
+            should_dem3 = rgi_subregion in dem3_regs
+        if should_dem3:
             # special case for some distant islands
             source = 'DEM3' if source is None else source
         else:
             source = 'RAMP' if source is None else source
         if source == 'RAMP':
-            _file = _download_alternate_topo_file('AntarcticDEM_wgs84.tif')
+            _file = _download_topo_file_from_cluster('AntarcticDEM_wgs84.tif')
             return [_file], source
 
     # Anywhere else on Earth we check for DEM3, ASTER, or SRTM
@@ -1913,22 +2106,24 @@ def get_ref_mb_glaciers(gdirs):
     """Get the list of glaciers we have valid data for."""
 
     # Get the links
-    v = gdirs[0].rgi_version
-    flink, _ = get_wgms_files(version=v)
-    dfids = flink['RGI{}0_ID'.format(v)].values
+    flink, _ = get_wgms_files()
+    dfids = flink['RGI{}0_ID'.format(gdirs[0].rgi_version[0])].values
 
     # We remove tidewater glaciers and glaciers with < 5 years
     ref_gdirs = []
     for g in gdirs:
         if g.rgi_id not in dfids or g.is_tidewater:
             continue
-        mbdf = g.get_ref_mb_data()
-        if len(mbdf) >= 5:
-            ref_gdirs.append(g)
+        try:
+            mbdf = g.get_ref_mb_data()
+            if len(mbdf) >= 5:
+                ref_gdirs.append(g)
+        except RuntimeError:
+            pass
     return ref_gdirs
 
 
-def compile_run_output(gdirs, path=True, monthly=False, filesuffix=''):
+def compile_run_output(gdirs, path=True, filesuffix=''):
     """Merge the output of the model runs of several gdirs into one file.
 
     Parameters
@@ -1937,8 +2132,6 @@ def compile_run_output(gdirs, path=True, monthly=False, filesuffix=''):
         the list of GlacierDir to process.
     path : str
         where to store (default is on the working dir).
-    monthly : bool
-        whether to store monthly values (default is yearly)
     filesuffix : str
         the filesuffix of the run
     """
@@ -1968,17 +2161,6 @@ def compile_run_output(gdirs, path=True, monthly=False, filesuffix=''):
         months = ds_diag.hydro_month.values
         cyrs = ds_diag.calendar_year.values
         cmonths = ds_diag.calendar_month.values
-
-        # Monthly or not
-        if monthly:
-            pkeep = np.ones(len(time), dtype=np.bool)
-        else:
-            pkeep = np.where(months == 1)
-        time = time[pkeep]
-        yrs = yrs[pkeep]
-        months = months[pkeep]
-        cyrs = cyrs[pkeep]
-        cmonths = cmonths[pkeep]
 
         # Prepare output
         ds = xr.Dataset()
@@ -2013,10 +2195,10 @@ def compile_run_output(gdirs, path=True, monthly=False, filesuffix=''):
             ppath = gdir.get_filepath('model_diagnostics',
                                       filesuffix=filesuffix)
             with xr.open_dataset(ppath) as ds_diag:
-                vol[:, i] = ds_diag.volume_m3.values[pkeep]
-                area[:, i] = ds_diag.area_m2.values[pkeep]
-                length[:, i] = ds_diag.length_m.values[pkeep]
-                ela[:, i] = ds_diag.ela_m.values[pkeep]
+                vol[:, i] = ds_diag.volume_m3.values
+                area[:, i] = ds_diag.area_m2.values
+                length[:, i] = ds_diag.length_m.values
+                ela[:, i] = ds_diag.ela_m.values
         except:
             vol[:, i] = np.NaN
             area[:, i] = np.NaN
@@ -2090,6 +2272,7 @@ def compile_climate_input(gdirs, path=True, filename='climate_monthly',
             except AttributeError:
                 y0 = ds_clim.temp.time.values[0].strftime('%Y')
                 y1 = ds_clim.temp.time.values[-1].strftime('%Y')
+            has_grad = 'gradient' in ds_clim.variables
 
     # We know the file is structured like this
     ctime = pd.period_range('{}-10'.format(y0), '{}-9'.format(y1), freq='M')
@@ -2124,7 +2307,8 @@ def compile_climate_input(gdirs, path=True, filename='climate_monthly',
     shape = (len(time), len(rgi_ids))
     temp = np.zeros(shape) * np.NaN
     prcp = np.zeros(shape) * np.NaN
-    grad = np.zeros(shape) * np.NaN
+    if has_grad:
+        grad = np.zeros(shape) * np.NaN
     ref_hgt = np.zeros(len(rgi_ids)) * np.NaN
     ref_pix_lon = np.zeros(len(rgi_ids)) * np.NaN
     ref_pix_lat = np.zeros(len(rgi_ids)) * np.NaN
@@ -2138,7 +2322,8 @@ def compile_climate_input(gdirs, path=True, filename='climate_monthly',
                 with xr.open_dataset(ppath) as ds_clim:
                     prcp[:, i] = ds_clim.prcp.values
                     temp[:, i] = ds_clim.temp.values
-                    grad[:, i] = ds_clim.grad
+                    if has_grad:
+                        grad[:, i] = ds_clim.gradient
                     ref_hgt[i] = ds_clim.ref_hgt
                     ref_pix_lon[i] = ds_clim.ref_pix_lon
                     ref_pix_lat[i] = ds_clim.ref_pix_lat
@@ -2151,9 +2336,10 @@ def compile_climate_input(gdirs, path=True, filename='climate_monthly',
     ds['prcp'] = (('time', 'rgi_id'), prcp)
     ds['prcp'].attrs['units'] = 'kg m-2'
     ds['prcp'].attrs['description'] = 'total monthly precipitation amount'
-    ds['grad'] = (('time', 'rgi_id'), grad)
-    ds['grad'].attrs['units'] = 'degC m-1'
-    ds['grad'].attrs['description'] = 'temperature gradient'
+    if has_grad:
+        ds['grad'] = (('time', 'rgi_id'), grad)
+        ds['grad'].attrs['units'] = 'degC m-1'
+        ds['grad'].attrs['description'] = 'temperature gradient'
     ds['ref_hgt'] = ('rgi_id', ref_hgt)
     ds['ref_hgt'].attrs['units'] = 'm'
     ds['ref_hgt'].attrs['description'] = 'reference height'
@@ -2173,7 +2359,7 @@ def compile_climate_input(gdirs, path=True, filename='climate_monthly',
 def compile_task_log(gdirs, task_names=[], filesuffix='', path=True,
                      append=True):
     """Gathers the log output for the selected task(s)
-    
+
     Parameters
     ----------
     gdirs: the list of GlacierDir to process.
@@ -2216,11 +2402,11 @@ def glacier_characteristics(gdirs, filesuffix='', path=True,
                             inversion_only=False):
     """Gathers as many statistics as possible about a list of glacier
     directories.
-    
+
     It can be used to do result diagnostics and other stuffs. If the data
     necessary for a statistic is not available (e.g.: flowlines length) it
     will simply be ignored.
-    
+
     Parameters
     ----------
     gdirs: the list of GlacierDir to process.
@@ -2249,6 +2435,7 @@ def glacier_characteristics(gdirs, filesuffix='', path=True,
         d['rgi_area_km2'] = gdir.rgi_area_km2
         d['glacier_type'] = gdir.glacier_type
         d['terminus_type'] = gdir.terminus_type
+        d['status'] = gdir.status
 
         # The rest is less certain. We put these in a try block and see
         # We're good with any error - we store the dict anyway below
@@ -2282,14 +2469,35 @@ def glacier_characteristics(gdirs, filesuffix='', path=True,
             out_df.append(d)
             continue
         try:
+            # Diagnostics
+            diags = gdir.get_diagnostics()
+            for k, v in diags.items():
+                d[k] = v
+        except:
+            pass
+        try:
             # Masks related stuff
             fpath = gdir.get_filepath('gridded_data')
-            with netCDF4.Dataset(fpath) as nc:
+            with ncDataset(fpath) as nc:
                 mask = nc.variables['glacier_mask'][:]
                 topo = nc.variables['topo'][:]
             d['dem_mean_elev'] = np.mean(topo[np.where(mask == 1)])
-            d['dem_max_elev'] = np.max(topo[np.where(mask == 1)])
+            d['dem_med_elev'] = np.median(topo[np.where(mask == 1)])
             d['dem_min_elev'] = np.min(topo[np.where(mask == 1)])
+            d['dem_max_elev'] = np.max(topo[np.where(mask == 1)])
+        except:
+            pass
+        try:
+            # Ext related stuff
+            fpath = gdir.get_filepath('gridded_data')
+            with ncDataset(fpath) as nc:
+                ext = nc.variables['glacier_ext'][:]
+                mask = nc.variables['glacier_mask'][:]
+                topo = nc.variables['topo'][:]
+            d['dem_max_elev_on_ext'] = np.max(topo[np.where(ext == 1)])
+            d['dem_min_elev_on_ext'] = np.min(topo[np.where(ext == 1)])
+            a = np.sum(mask & (topo > d['dem_max_elev_on_ext']))
+            d['dem_perc_area_above_max_elev_on_ext'] = a / np.sum(mask)
         except:
             pass
         try:
@@ -2325,7 +2533,6 @@ def glacier_characteristics(gdirs, filesuffix='', path=True,
             # MB calib
             df = pd.read_csv(gdir.get_filepath('local_mustar')).iloc[0]
             d['t_star'] = df['t_star']
-            d['prcp_fac'] = df['prcp_fac']
             d['mu_star'] = df['mu_star']
             d['mb_bias'] = df['bias']
         except:
@@ -2449,9 +2656,9 @@ class entity_task(object):
                 gdir.log(task_name, err=err)
                 pipe_log(gdir, task_name, err=err)
                 if print_log:
-                    self.log.error('%s occurred during task %s on %s!',
+                    self.log.error('%s occurred during task %s on %s: %s',
                                    type(err).__name__, task_name,
-                                   gdir.rgi_id)
+                                   gdir.rgi_id, str(err))
                 if not cfg.PARAMS['continue_on_error']:
                     raise
             return out
@@ -2531,6 +2738,7 @@ def idealized_gdir(surface_h, widths_m, map_dx, flowline_dx=1,
     entity.O1Region = '00'
     entity.O2Region = '0'
     gdir = GlacierDirectory(entity, base_dir=base_dir, reset=reset)
+    gpd.GeoDataFrame([entity]).to_file(gdir.get_filepath('outlines'))
 
     # Idealized flowline
     coords = np.arange(0, len(surface_h)-0.5, 1)
@@ -2633,52 +2841,53 @@ class GlacierDirectory(object):
         self.extent_ll = [xx, yy]
 
         try:
-            # Assume RGI V4
-            self.rgi_id = rgi_entity.RGIID
-            self.glims_id = rgi_entity.GLIMSID
-            self.rgi_area_km2 = float(rgi_entity.AREA)
-            self.cenlon = float(rgi_entity.CENLON)
-            self.cenlat = float(rgi_entity.CENLAT)
-            self.rgi_region = '{:02d}'.format(int(rgi_entity.O1REGION))
-            self.rgi_subregion = self.rgi_region + '-' + \
-                                 '{:02d}'.format(int(rgi_entity.O2REGION))
-            name = rgi_entity.NAME
-            rgi_datestr = rgi_entity.BGNDATE
-            gtype = rgi_entity.GLACTYPE
+            # RGI V4?
+            _ = rgi_entity.RGIID
+            raise ValueError('RGI Version 4 is not supported anymore')
         except AttributeError:
-            # Should be V5
-            self.rgi_id = rgi_entity.RGIId
-            self.glims_id = rgi_entity.GLIMSId
-            self.rgi_area_km2 = float(rgi_entity.Area)
-            self.cenlon = float(rgi_entity.CenLon)
-            self.cenlat = float(rgi_entity.CenLat)
-            self.rgi_region = '{:02d}'.format(int(rgi_entity.O1Region))
-            self.rgi_subregion = (self.rgi_region + '-' +
-                                  '{:02d}'.format(int(rgi_entity.O2Region)))
-            name = rgi_entity.Name
-            rgi_datestr = rgi_entity.BgnDate
+            pass
 
-            try:
-                gtype = rgi_entity.GlacType
-            except AttributeError:
-                # RGI V6
-                gtype = [str(rgi_entity.Form), str(rgi_entity.TermType)]
+        # Should be V5
+        self.rgi_id = rgi_entity.RGIId
+        self.glims_id = rgi_entity.GLIMSId
+        self.cenlon = float(rgi_entity.CenLon)
+        self.cenlat = float(rgi_entity.CenLat)
+        self.rgi_region = '{:02d}'.format(int(rgi_entity.O1Region))
+        self.rgi_subregion = (self.rgi_region + '-' +
+                              '{:02d}'.format(int(rgi_entity.O2Region)))
+        name = rgi_entity.Name
+        rgi_datestr = rgi_entity.BgnDate
+
+        try:
+            gtype = rgi_entity.GlacType
+        except AttributeError:
+            # RGI V6
+            gtype = [str(rgi_entity.Form), str(rgi_entity.TermType)]
+
+        try:
+            gstatus = rgi_entity.RGIFlag[0]
+        except AttributeError:
+            # RGI V6
+            gstatus = rgi_entity.Status
 
         # rgi version can be useful
-        self.rgi_version = self.rgi_id.split('-')[0][-2]
-        if self.rgi_version not in ['4', '5', '6']:
-            raise RuntimeError('RGI Version not understood: '
+        self.rgi_version = self.rgi_id.split('-')[0][-2:]
+        if self.rgi_version not in ['50', '60', '61']:
+            raise RuntimeError('RGI Version not supported: '
                                '{}'.format(self.rgi_version))
 
         # remove spurious characters and trailing blanks
         self.name = filter_rgi_name(name)
 
         # region
-        reg_names, subreg_names = parse_rgi_meta(version=self.rgi_version)
+        reg_names, subreg_names = parse_rgi_meta(version=self.rgi_version[0])
         n = reg_names.loc[int(self.rgi_region)].values[0]
         self.rgi_region_name = self.rgi_region + ': ' + n
-        n = subreg_names.loc[self.rgi_subregion].values[0]
-        self.rgi_subregion_name = self.rgi_subregion + ': ' + n
+        try:
+            n = subreg_names.loc[self.rgi_subregion].values[0]
+            self.rgi_subregion_name = self.rgi_subregion + ': ' + n
+        except KeyError:
+            self.rgi_subregion_name = self.rgi_subregion + ': NoName'
 
         # Read glacier attrs
         gtkeys = {'0': 'Glacier',
@@ -2695,10 +2904,17 @@ class GlacierDirectory(object):
                   '5': 'Shelf-terminating',
                   '9': 'Not assigned',
                   }
+        stkeys = {'0': 'Glacier or ice cap',
+                  '1': 'Glacier complex',
+                  '2': 'Nominal glacier',
+                  '9': 'Not assigned',
+                  }
         self.glacier_type = gtkeys[gtype[0]]
         self.terminus_type = ttkeys[gtype[1]]
+        self.status = stkeys['{}'.format(gstatus)]
         self.is_tidewater = self.terminus_type in ['Marine-terminating',
                                                    'Lake-terminating']
+        self.is_nominal = self.status == 'Nominal glacier'
         self.inversion_calving_rate = 0.
         self.is_icecap = self.glacier_type == 'Ice cap'
 
@@ -2726,6 +2942,7 @@ class GlacierDirectory(object):
 
         # Optimization
         self._mbdf = None
+        self._mbprofdf = None
 
     def __repr__(self):
 
@@ -2753,48 +2970,19 @@ class GlacierDirectory(object):
         return salem.Grid.from_json(self.get_filepath('glacier_grid'))
 
     @lazy_property
+    def rgi_area_km2(self):
+        """The glacier's RGI area (km2)."""
+        try:
+            _area = gpd.read_file(self.get_filepath('outlines'))['Area']
+            return np.round(float(_area), decimals=3)
+        except OSError:
+            raise RuntimeError('Please run `define_glacier_region` before '
+                               'using this property.')
+
+    @property
     def rgi_area_m2(self):
         """The glacier's RGI area (m2)."""
         return self.rgi_area_km2 * 10**6
-
-    def copy_to_basedir(self, base_dir, setup='run'):
-        """Copies the glacier directory and its content to a new location.
-
-        This utility function allows to select certain files only, thus
-        saving time at copy.
-
-        Parameters
-        ----------
-        basedir : str
-            path to the new base directory (should end with "per_glacier" most
-            of the times)
-        setup : str
-            set up you want the copied directory to be useful for. Currently
-            supported are 'all' (copy the entire directory), 'inversion'
-            (copy the necessary files for the inversion AND the run)
-            and 'run' (copy the necessary files for a dynamical run).
-        """
-
-        base_dir = os.path.abspath(base_dir)
-        new_dir = os.path.join(base_dir, self.rgi_id[:8], self.rgi_id[:11],
-                               self.rgi_id)
-        if setup == 'run':
-            paths = ['model_flowlines', 'inversion_params',
-                     'local_mustar', 'climate_monthly', 'gridded_data']
-            paths = ('*' + p + '*' for p in paths)
-            shutil.copytree(self.dir, new_dir,
-                            ignore=include_patterns(*paths))
-        elif setup == 'inversion':
-            paths = ['inversion_params', 'downstream_line',
-                     'inversion_flowlines', 'glacier_grid',
-                     'local_mustar', 'climate_monthly', 'gridded_data']
-            paths = ('*' + p + '*' for p in paths)
-            shutil.copytree(self.dir, new_dir,
-                            ignore=include_patterns(*paths))
-        elif setup == 'all':
-            shutil.copytree(self.dir, new_dir)
-        else:
-            raise ValueError('setup not understood: {}'.format(setup))
 
     def get_filepath(self, filename, delete=False, filesuffix=''):
         """Absolute path to a specific file.
@@ -2837,6 +3025,39 @@ class GlacierDirectory(object):
         """
 
         return os.path.exists(self.get_filepath(filename))
+
+    def add_to_diagnostics(self, key, value):
+        """Write a key, value pair to the gdir's runtime diagnostics.
+
+        Parameters
+        ----------
+        key : str
+            dict entry key
+        value : str or number
+            dict entry value
+        """
+
+        d = self.get_diagnostics()
+        d[key] = value
+        with open(self.get_filepath('diagnostics'), 'w') as f:
+            json.dump(d, f)
+
+    def get_diagnostics(self):
+        """Read the gdir's runtime diagnostics.
+
+        Returns
+        -------
+        the diagnostics dict
+        """
+        # If not there, create an empty one
+        if not self.has_file('diagnostics'):
+            with open(self.get_filepath('diagnostics'), 'w') as f:
+                json.dump(dict(), f)
+
+        # Read and return
+        with open(self.get_filepath('diagnostics'), 'r') as f:
+            out = json.load(f)
+        return out
 
     def read_pickle(self, filename, use_compression=None, filesuffix=''):
         """Reads a pickle located in the directory.
@@ -2908,7 +3129,7 @@ class GlacierDirectory(object):
         if os.path.exists(fpath):
             os.remove(fpath)
 
-        nc = netCDF4.Dataset(fpath, 'w', format='NETCDF4')
+        nc = ncDataset(fpath, 'w', format='NETCDF4')
 
         xd = nc.createDimension('x', self.grid.nx)
         yd = nc.createDimension('y', self.grid.ny)
@@ -2947,14 +3168,30 @@ class GlacierDirectory(object):
 
         return nc
 
-    def write_monthly_climate_file(self, time, prcp, temp, grad, ref_pix_hgt,
-                                   ref_pix_lon, ref_pix_lat,
+    def write_monthly_climate_file(self, time, prcp, temp,
+                                   ref_pix_hgt, ref_pix_lon, ref_pix_lat, *,
+                                   gradient=None,
                                    time_unit='days since 1801-01-01 00:00:00',
                                    file_name='climate_monthly',
                                    filesuffix=''):
-        """Creates a netCDF4 file with climate data.
+        """Creates a netCDF4 file with climate data timeseries.
 
-        See :py:func:`~oggm.tasks.process_cru_data`.
+        Parameters
+        ----------
+        time
+        prcp
+        temp
+        ref_pix_hgt
+        ref_pix_lon
+        ref_pix_lat
+        gradient
+        time_unit
+        file_name
+        filesuffix
+
+        Returns
+        -------
+
         """
 
         # overwrite as default
@@ -2962,7 +3199,9 @@ class GlacierDirectory(object):
         if os.path.exists(fpath):
             os.remove(fpath)
 
-        with netCDF4.Dataset(fpath, 'w', format='NETCDF4') as nc:
+        zlib = cfg.PARAMS['compress_climate_netcdf']
+
+        with ncDataset(fpath, 'w', format='NETCDF4') as nc:
             nc.ref_hgt = ref_pix_hgt
             nc.ref_pix_lon = ref_pix_lon
             nc.ref_pix_lat = ref_pix_lat
@@ -2974,25 +3213,25 @@ class GlacierDirectory(object):
             nc.author = 'OGGM'
             nc.author_info = 'Open Global Glacier Model'
 
-            timev = nc.createVariable('time','i4',('time',))
-            timev.setncatts({'units':time_unit})
-            timev[:] = netCDF4.date2num([t for t in time],
-                                        time_unit)
+            timev = nc.createVariable('time', 'i4', ('time',))
+            timev.setncatts({'units': time_unit})
+            timev[:] = netCDF4.date2num([t for t in time], time_unit)
 
-            v = nc.createVariable('prcp', 'f4', ('time',), zlib=True)
+            v = nc.createVariable('prcp', 'f4', ('time',), zlib=zlib)
             v.units = 'kg m-2'
             v.long_name = 'total monthly precipitation amount'
             v[:] = prcp
 
-            v = nc.createVariable('temp', 'f4', ('time',), zlib=True)
+            v = nc.createVariable('temp', 'f4', ('time',), zlib=zlib)
             v.units = 'degC'
             v.long_name = '2m temperature at height ref_hgt'
             v[:] = temp
 
-            v = nc.createVariable('grad', 'f4', ('time',), zlib=True)
-            v.units = 'degC m-1'
-            v.long_name = 'temperature gradient'
-            v[:] = grad
+            if gradient is not None:
+                v = nc.createVariable('gradient', 'f4', ('time',), zlib=zlib)
+                v.units = 'degC m-1'
+                v.long_name = 'temperature gradient from local regression'
+                v[:] = gradient
 
     def get_inversion_flowline_hw(self):
         """ Shortcut function to read the heights and widths of the glacier.
@@ -3014,11 +3253,14 @@ class GlacierDirectory(object):
         return h, w * self.grid.dx
 
     def get_ref_mb_data(self):
-        """Get the reference mb data from WGMS (for some glaciers only!)."""
+        """Get the reference mb data from WGMS (for some glaciers only!).
+
+        Raises an Error if it isn't a reference glacier at all.
+        """
 
         if self._mbdf is None:
-            flink, mbdatadir = get_wgms_files(version=self.rgi_version)
-            c = 'RGI{}0_ID'.format(self.rgi_version)
+            flink, mbdatadir = get_wgms_files()
+            c = 'RGI{}0_ID'.format(self.rgi_version[0])
             wid = flink.loc[flink[c] == self.rgi_id]
             if len(wid) == 0:
                 raise RuntimeError('Not a reference glacier!')
@@ -3034,14 +3276,52 @@ class GlacierDirectory(object):
         if not self.has_file('climate_info'):
             raise RuntimeError('Please process some climate data before call')
         ci = self.read_pickle('climate_info')
-        y0 = ci['hydro_yr_0']
-        y1 = ci['hydro_yr_1']
+        y0 = ci['baseline_hydro_yr_0']
+        y1 = ci['baseline_hydro_yr_1']
         if len(self._mbdf) > 1:
             out = self._mbdf.loc[y0:y1]
         else:
             # Some files are just empty
             out = self._mbdf
         return out.dropna(subset=['ANNUAL_BALANCE'])
+
+    def get_ref_mb_profile(self):
+        """Get the reference mb profile data from WGMS (if available!).
+
+        Returns None if this glacier has no profile and an Error if it isn't
+        a reference glacier at all.
+        """
+
+        if self._mbprofdf is None:
+            flink, mbdatadir = get_wgms_files()
+            c = 'RGI{}0_ID'.format(self.rgi_version[0])
+            wid = flink.loc[flink[c] == self.rgi_id]
+            if len(wid) == 0:
+                raise RuntimeError('Not a reference glacier!')
+            wid = wid.WGMS_ID.values[0]
+
+            # file
+            mbdatadir = os.path.join(os.path.dirname(mbdatadir), 'mb_profiles')
+            reff = os.path.join(mbdatadir,
+                                'profile_WGMS-{:05d}.csv'.format(wid))
+            if not os.path.exists(reff):
+                return None
+            # list of years
+            self._mbprofdf = pd.read_csv(reff, index_col=0)
+
+        # logic for period
+        if not self.has_file('climate_info'):
+            raise RuntimeError('Please process some climate data before call')
+        ci = self.read_pickle('climate_info')
+        y0 = ci['baseline_hydro_yr_0']
+        y1 = ci['baseline_hydro_yr_1']
+        if len(self._mbprofdf) > 1:
+            out = self._mbprofdf.loc[y0:y1]
+        else:
+            # Some files are just empty
+            out = self._mbprofdf
+        out.columns = [float(c) for c in out.columns]
+        return out.dropna(axis=1, how='all').dropna(axis=0, how='all')
 
     def get_ref_length_data(self):
         """Get the glacier lenght data from P. Leclercq's data base.
@@ -3120,3 +3400,130 @@ class GlacierDirectory(object):
             return lines[-1].split(';')[-1]
         else:
             return None
+
+
+def shape_factor_huss(widths, heights, is_rectangular):
+    """Compute shape factor for inclusion of lateral drag
+    according to Huss and Farinotti (2012). The shape factor is only applied
+    for parabolic sections.
+
+    Not yet tested
+
+    Parameters
+    ----------
+    widths: ndarray of floats
+        widths of the sections
+    heights: float or ndarray of floats
+        height of the sections
+    is_rectangular: bool or ndarray of bools
+        determines, whether section has a rectangular or parabolic shape
+
+    Returns
+    -------
+    shape factor (no units)
+    """
+
+    # Ensure bool (for masking)
+    is_rect = is_rectangular.astype(bool)
+    shape_factors = np.ones(widths.shape)
+
+    # TODO: could check for division by 0, but at the moment
+    # this is covered by interpolation and clip, resulting in a factor of 1
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+        shape_factors[~is_rect] = (widths / (2 * heights + widths))[~is_rect]
+    shape_factors[heights <= 0.] = 1.
+
+    return shape_factors
+
+
+def shape_factor_adhikari(widths, heights, is_rectangular):
+    """Compute shape factor for inclusion of lateral drag according to
+    Adhikari (2012)
+
+    TODO: should we expand this here to also include
+    the factors suggested for sliding?
+
+    Parameters
+    ----------
+    widths: ndarray of floats
+        widths of the sections
+    heights: ndarray of floats
+        heights of the sections
+    is_rectangular: ndarray of bools
+        determines, whether section has a rectangular or parabolic shape
+
+    Returns
+    -------
+    shape factors (no units), ndarray of floats
+    """
+
+    # Ensure bool (for masking)
+    is_rectangular = is_rectangular.astype(bool)
+
+    # TODO: could check for division by 0, but at the moment
+    # this is covered by interpolation and clip, resulting in a factor of 1
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+        zetas = widths / 2. / heights
+
+    shape_factors = np.ones(widths.shape)
+
+    # TODO: higher order interpolation? (e.g. via InterpolatedUnivariateSpline)
+    shape_factors[is_rectangular] = ADHIKARI_FACTORS_RECTANGULAR(
+                                        zetas[is_rectangular])
+    shape_factors[~is_rectangular] = ADHIKARI_FACTORS_PARABOLIC(
+                                        zetas[~is_rectangular])
+
+    np.clip(shape_factors, 0.2, 1., out=shape_factors)
+    # Set NaN values resulting from zero height to a shape factor of 1
+    shape_factors[np.isnan(shape_factors)] = 1.
+
+    return shape_factors
+
+
+@entity_task(logger)
+def copy_to_basedir(gdir, base_dir, setup='run'):
+    """Copies the glacier directories and their content to a new location.
+
+    This utility function allows to select certain files only, thus
+    saving time at copy.
+
+    Parameters
+    ----------
+    base_dir : str
+        path to the new base directory (should end with "per_glacier" most
+        of the times)
+    setup : str
+        set up you want the copied directory to be useful for. Currently
+        supported are 'all' (copy the entire directory), 'inversion'
+        (copy the necessary files for the inversion AND the run)
+        and 'run' (copy the necessary files for a dynamical run).
+
+    Returns
+    -------
+    New glacier directories from the copied folders
+    """
+    base_dir = os.path.abspath(base_dir)
+    new_dir = os.path.join(base_dir, gdir.rgi_id[:8], gdir.rgi_id[:11],
+                           gdir.rgi_id)
+    if setup == 'run':
+        paths = ['model_flowlines', 'inversion_params', 'outlines',
+                 'local_mustar', 'climate_monthly', 'gridded_data',
+                 'cesm_data', 'climate_info']
+        paths = ('*' + p + '*' for p in paths)
+        shutil.copytree(gdir.dir, new_dir,
+                        ignore=include_patterns(*paths))
+    elif setup == 'inversion':
+        paths = ['inversion_params', 'downstream_line', 'outlines',
+                 'inversion_flowlines', 'glacier_grid',
+                 'local_mustar', 'climate_monthly', 'gridded_data',
+                 'cesm_data', 'climate_info']
+        paths = ('*' + p + '*' for p in paths)
+        shutil.copytree(gdir.dir, new_dir,
+                        ignore=include_patterns(*paths))
+    elif setup == 'all':
+        shutil.copytree(gdir.dir, new_dir)
+    else:
+        raise ValueError('setup not understood: {}'.format(setup))
+    return GlacierDirectory(gdir.rgi_id, base_dir=base_dir)

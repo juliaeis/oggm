@@ -13,9 +13,9 @@ from numpy.testing import assert_allclose
 
 # Local imports
 from oggm.core.massbalance import LinearMassBalance
-from oggm.tests import is_slow, is_performance_test, RUN_NUMERIC_TESTS
 from oggm import utils
 from oggm.cfg import N, SEC_IN_DAY
+from oggm.core.sia2d import Upstream2D
 
 # Tests
 from oggm.tests.funcs import *
@@ -23,10 +23,7 @@ from oggm.tests.funcs import *
 # after oggm.test
 import matplotlib.pyplot as plt
 
-# do we event want to run the tests?
-if not RUN_NUMERIC_TESTS:
-    raise unittest.SkipTest('Skipping all numerics tests.')
-
+pytestmark = pytest.mark.test_env("numerics")
 do_plot = False
 
 
@@ -42,7 +39,7 @@ class TestIdealisedCases(unittest.TestCase):
     def tearDown(self):
         pass
 
-    @is_slow
+    @pytest.mark.slow
     def test_constant_bed(self):
 
         models = [flowline.KarthausModel, flowline.FluxBasedModel,
@@ -110,7 +107,7 @@ class TestIdealisedCases(unittest.TestCase):
         self.assertTrue(utils.rmsd(surface_h[0], surface_h[2] ) <1.0)
         self.assertTrue(utils.rmsd(surface_h[1], surface_h[2] ) <1.0)
 
-    @is_slow
+    @pytest.mark.slow
     def test_mass_conservation(self):
 
         mb = LinearMassBalance(2600.)
@@ -143,8 +140,7 @@ class TestIdealisedCases(unittest.TestCase):
         tot_vol = model.volume_m3 + model.calving_m3_since_y0
         assert_allclose(model.total_mass, tot_vol, rtol=2e-2)
 
-    @is_slow
-    @is_performance_test
+    @pytest.mark.slow
     def test_min_slope(self):
         """ Check what is the min slope a flowline model can produce
         """
@@ -228,8 +224,7 @@ class TestIdealisedCases(unittest.TestCase):
             plt.legend(['Bed' ,'Karthaus' ,'Flux' ,'MUSCL-SuperBee'] ,loc=3)
             plt.show()
 
-    @is_slow
-    @is_performance_test
+    @pytest.mark.slow
     def test_cliff(self):
         """ a test case for mass conservation in the flowline models
             the idea is to introduce a cliff in the sloping bed and see
@@ -242,13 +237,13 @@ class TestIdealisedCases(unittest.TestCase):
         lens = []
         surface_h = []
         volume = []
-        yrs = np.arange(1, 700, 2)
+        yrs = np.arange(1, 500, 2)
         for model in models:
             fls = dummy_constant_bed_cliff()
             mb = LinearMassBalance(2600.)
 
             model = model(fls, mb_model=mb, y0=0., glen_a=self.glen_a,
-                          fs=self.fs, fixed_dt= 2 *SEC_IN_DAY)
+                          fs=self.fs, fixed_dt=2*SEC_IN_DAY)
 
             length = yrs * 0.
             vol = yrs * 0.
@@ -260,7 +255,7 @@ class TestIdealisedCases(unittest.TestCase):
             volume.append(vol)
             surface_h.append(fls[-1].surface_h.copy())
 
-        if do_plot:  # pragma: no cover
+        if False:  # pragma: no cover
             plt.figure()
             plt.plot(yrs, lens[0], 'r')
             plt.plot(yrs, lens[1], 'b')
@@ -315,7 +310,7 @@ class TestIdealisedCases(unittest.TestCase):
             self.assertTrue(utils.rmsd(surface_h[1], surface_h[2] ) <1.0)
 
 
-    @is_slow
+    @pytest.mark.slow
     def test_equilibrium(self):
 
         models = [flowline.KarthausModel, flowline.FluxBasedModel]
@@ -377,7 +372,7 @@ class TestIdealisedCases(unittest.TestCase):
         self.assertTrue(utils.rmsd(surface_h[0], surface_h[1]) < 5)
         self.assertTrue(utils.rmsd(surface_h[1], surface_h[2]) < 5)
 
-    @is_slow
+    @pytest.mark.slow
     def test_timestepping(self):
 
         steps = ['ambitious',
@@ -410,7 +405,7 @@ class TestIdealisedCases(unittest.TestCase):
         np.testing.assert_allclose(volume[0][-1], volume[2][-1], atol=1e-2)
         np.testing.assert_allclose(volume[0][-1], volume[3][-1], atol=1e-2)
 
-    @is_slow
+    @pytest.mark.slow
     def test_bumpy_bed(self):
 
         models = [flowline.KarthausModel, flowline.FluxBasedModel,
@@ -476,7 +471,7 @@ class TestIdealisedCases(unittest.TestCase):
         self.assertTrue(utils.rmsd(surface_h[0], surface_h[1] ) <5)
         self.assertTrue(utils.rmsd(surface_h[0], surface_h[2] ) <5)
 
-    @is_slow
+    @pytest.mark.slow
     def test_noisy_bed(self):
 
         models = [flowline.KarthausModel, flowline.FluxBasedModel,
@@ -543,7 +538,7 @@ class TestIdealisedCases(unittest.TestCase):
         self.assertTrue(utils.rmsd(surface_h[0], surface_h[1] ) <10)
         self.assertTrue(utils.rmsd(surface_h[0], surface_h[2] ) <10)
 
-    @is_slow
+    @pytest.mark.slow
     def test_varying_width(self):
         """This test is for a flowline glacier of variying width, i.e with an
          accumulation area twice as wide as the tongue."""
@@ -613,7 +608,7 @@ class TestIdealisedCases(unittest.TestCase):
         np.testing.assert_allclose(utils.rmsd(surface_h[0], surface_h[1]), 0.,
                                    atol=5)
 
-    @is_slow
+    @pytest.mark.slow
     def test_tributary(self):
 
         models = [flowline.KarthausModel, flowline.FluxBasedModel]
@@ -663,7 +658,7 @@ class TestIdealisedCases(unittest.TestCase):
             plt.plot(surface_h[1], 'b')
             plt.show()
 
-    @is_slow
+    @pytest.mark.slow
     def test_trapezoidal_bed(self):
 
         tb = dummy_trapezoidal_bed()[0]
@@ -731,7 +726,7 @@ class TestIdealisedCases(unittest.TestCase):
             plt.plot(widths[1], 'b')
             plt.show()
 
-    @is_slow
+    @pytest.mark.slow
     def test_parabolic_bed(self):
 
         models = [flowline.KarthausModel, flowline.FluxBasedModel]
@@ -780,7 +775,7 @@ class TestIdealisedCases(unittest.TestCase):
             plt.plot(widths[1], 'b')
             plt.show()
 
-    @is_slow
+    @pytest.mark.slow
     def test_mixed_bed(self):
 
         models = [flowline.KarthausModel, flowline.FluxBasedModel]
@@ -833,7 +828,7 @@ class TestIdealisedCases(unittest.TestCase):
             plt.legend()
             plt.show()
 
-    @is_slow
+    @pytest.mark.slow
     def test_boundaries(self):
 
         fls = dummy_constant_bed()
@@ -854,7 +849,7 @@ class TestSia2d(unittest.TestCase):
     def tearDown(self):
         pass
 
-    @is_slow
+    @pytest.mark.slow
     def test_constant_bed(self):
 
         map_dx = 100.
@@ -889,7 +884,6 @@ class TestSia2d(unittest.TestCase):
         # Make a 2D bed out of the 1D
         bed_2d = np.repeat(fls[-1].bed_h, 3).reshape((fls[-1].nx, 3))
 
-        from oggm.core.sia2d import Upstream2D
         sdmodel = Upstream2D(bed_2d, dx=map_dx, mb_model=mb, y0=0.,
                              glen_a=cfg.A, ice_thick_filter=None)
 
@@ -954,7 +948,40 @@ class TestSia2d(unittest.TestCase):
         ts = run_ds['ice_thickness'].mean(dim=['y', 'x'])
         assert_allclose(ts, ts.values[0], atol=1)
 
-    @pytest.mark.skip(reason='Currently not in OGGM')
+        # Other direction
+        bed_2d = np.repeat(fls[-1].bed_h, 3).reshape((fls[-1].nx, 3)).T
+
+        sdmodel = Upstream2D(bed_2d, dx=map_dx, mb_model=mb, y0=0.,
+                             glen_a=cfg.A, ice_thick_filter=None)
+
+        length = yrs * 0.
+        vol = yrs * 0.
+        area = yrs * 0
+        for i, y in enumerate(yrs):
+            sdmodel.run_until(y)
+            surf_1d = sdmodel.ice_thick[1, :]
+            length[i] = np.sum(surf_1d > 0) * sdmodel.dx
+            vol[i] = sdmodel.volume_km3 / 3
+            area[i] = sdmodel.area_km2 / 3
+
+        lens.append(length)
+        volume.append(vol)
+        areas.append(area)
+        surface_h.append(sdmodel.surface_h[:, 1])
+
+        np.testing.assert_almost_equal(lens[0][-1], lens[1][-1])
+        np.testing.assert_allclose(volume[0][-1], volume[1][-1], atol=3e-3)
+
+        self.assertTrue(utils.rmsd(lens[0], lens[1]) < 50.)
+        self.assertTrue(utils.rmsd(volume[0], volume[1]) < 2e-3)
+        self.assertTrue(utils.rmsd(areas[0], areas[1]) < 2e-3)
+        self.assertTrue(utils.rmsd(surface_h[0], surface_h[1]) < 1.0)
+
+        # Equilibrium
+        sdmodel.run_until_equilibrium()
+        assert_allclose(sdmodel.volume_km3 / 3, flmodel.volume_km3, atol=2e-3)
+        assert_allclose(sdmodel.area_km2 / 3, flmodel.area_km2, atol=2e-3)
+
     def test_bueler(self):
         # TODO: add formal test like Alex's
         # https://github.com/alexjarosch/sia-fluxlim

@@ -20,19 +20,15 @@ from oggm import graphics
 import oggm.cfg as cfg
 from oggm import workflow
 from oggm.utils import get_demo_file, rmsd, write_centerlines_to_shape
-from oggm.tests import is_slow, RUN_WORKFLOW_TESTS
-from oggm.tests import is_graphic_test, BASELINE_DIR
+from oggm.tests import BASELINE_DIR
 from oggm.tests.funcs import (get_test_dir, use_multiprocessing,
                               patch_url_retrieve_github)
 from oggm.core import flowline, massbalance
 from oggm import tasks
 from oggm import utils
 
-# do we event want to run the tests?
-if not RUN_WORKFLOW_TESTS:
-    raise unittest.SkipTest('Skipping all workflow tests.')
-
 # Globals
+pytestmark = pytest.mark.test_env("workflow")
 TEST_DIR = os.path.join(get_test_dir(), 'tmp_workflow')
 CLI_LOGF = os.path.join(TEST_DIR, 'clilog.pkl')
 
@@ -125,8 +121,9 @@ def up_to_inversion(reset=False):
     if reset:
         # Use histalp for the actual inversion test
         cfg.PARAMS['temp_use_local_gradient'] = True
-        cfg.PATHS['climate_file'] = get_demo_file('HISTALP_oetztal.nc')
-        cfg.PATHS['cru_dir'] = ''
+        cfg.PARAMS['baseline_climate'] = 'HISTALP'
+        cru_dir = get_demo_file('HISTALP_precipitation_all_abs_1801-2014.nc')
+        cfg.PATHS['cru_dir'] = os.path.dirname(cru_dir)
         workflow.climate_tasks(gdirs)
         with open(CLI_LOGF, 'wb') as f:
             pickle.dump('histalp', f)
@@ -157,7 +154,7 @@ def up_to_distrib(reset=False):
         # Use CRU
         cfg.PARAMS['prcp_scaling_factor'] = 2.5
         cfg.PARAMS['temp_use_local_gradient'] = False
-        cfg.PATHS['climate_file'] = ''
+        cfg.PARAMS['baseline_climate'] = 'CRU'
         cru_dir = get_demo_file('cru_ts3.23.1901.2014.tmp.dat.nc')
         cfg.PATHS['cru_dir'] = os.path.dirname(cru_dir)
         with warnings.catch_warnings():
@@ -165,7 +162,7 @@ def up_to_distrib(reset=False):
             warnings.simplefilter("ignore")
             workflow.execute_entity_task(tasks.process_cru_data, gdirs)
         tasks.compute_ref_t_stars(gdirs)
-        tasks.distribute_t_stars(gdirs)
+        workflow.execute_entity_task(tasks.local_mustar, gdirs)
         workflow.execute_entity_task(tasks.apparent_mb, gdirs)
         with open(CLI_LOGF, 'wb') as f:
             pickle.dump('cru', f)
@@ -191,7 +188,7 @@ def random_for_plot():
 
 class TestWorkflow(unittest.TestCase):
 
-    @is_slow
+    @pytest.mark.slow
     def test_init_present_time_glacier(self):
 
         gdirs = up_to_inversion()
@@ -248,14 +245,14 @@ class TestWorkflow(unittest.TestCase):
         assert np.all(dfc.t_star > 1900)
         assert np.all(dfc.tstar_aar.mean() > 0.5)
 
-    @is_slow
+    @pytest.mark.slow
     def test_crossval(self):
 
         gdirs = up_to_distrib()
 
         # in case we ran crossval we need to rerun
         tasks.compute_ref_t_stars(gdirs)
-        tasks.distribute_t_stars(gdirs)
+        workflow.execute_entity_task(tasks.local_mustar, gdirs)
         workflow.execute_entity_task(tasks.apparent_mb, gdirs)
 
         # before crossval
@@ -267,25 +264,6 @@ class TestWorkflow(unittest.TestCase):
         tasks.crossval_t_stars(gdirs)
         file = os.path.join(cfg.PATHS['working_dir'], 'crossval_tstars.csv')
         df = pd.read_csv(file, index_col=0)
-
-        # after crossval we need to rerun
-        tasks.compute_ref_t_stars(gdirs)
-        tasks.distribute_t_stars(gdirs)
-        workflow.execute_entity_task(tasks.apparent_mb, gdirs)
-
-        # Test if quicker crossval is also OK
-        tasks.quick_crossval_t_stars(gdirs)
-        file = os.path.join(cfg.PATHS['working_dir'], 'crossval_tstars.csv')
-        dfq = pd.read_csv(file, index_col=0)
-
-        # after crossval we need to rerun
-        tasks.compute_ref_t_stars(gdirs)
-        tasks.distribute_t_stars(gdirs)
-        workflow.execute_entity_task(tasks.apparent_mb, gdirs)
-        assert np.all(np.abs(df.cv_bias) < 50)
-        assert np.all(np.abs(dfq.cv_bias) < 50)
-        # The biases aren't entirely equivalent and its ok
-        np.testing.assert_allclose(df.cv_prcp_fac, dfq.cv_prcp_fac)
 
         # see if the process didn't brake anything
         mustars = []
@@ -315,7 +293,7 @@ class TestWorkflow(unittest.TestCase):
             mm = mbdf.mean()
             np.testing.assert_allclose(mm['mine'], mm['ref'], atol=1e-3)
 
-    @is_slow
+    @pytest.mark.slow
     def test_shapefile_output(self):
 
         # Just to increase coveralls, hehe
@@ -330,10 +308,12 @@ class TestWorkflow(unittest.TestCase):
         self.assertEqual(len(shp), 3)
         self.assertEqual(shp.loc[shp.LE_SEGMENT.idxmax()].MAIN, 1)
 
-    @is_slow
+    @pytest.mark.slow
     def test_random(self):
 
         # Fake Reset (all these tests are horribly coded)
+        if not os.path.exists(TEST_DIR):
+            os.makedirs(TEST_DIR)
         with open(CLI_LOGF, 'wb') as f:
             pickle.dump('none', f)
         gdirs = up_to_inversion()
@@ -341,6 +321,7 @@ class TestWorkflow(unittest.TestCase):
         workflow.execute_entity_task(flowline.init_present_time_glacier, gdirs)
         workflow.execute_entity_task(flowline.run_random_climate, gdirs,
                                      nyears=200, seed=0,
+                                     store_monthly_step=True,
                                      output_filesuffix='_test')
 
         for gd in gdirs:
@@ -369,7 +350,7 @@ class TestWorkflow(unittest.TestCase):
             assert_allclose(df.RUN, df.DIAG)
 
         # Test output
-        ds = utils.compile_run_output(gdirs, filesuffix='_test', monthly=True)
+        ds = utils.compile_run_output(gdirs, filesuffix='_test')
         assert_allclose(ds_diag.volume_m3, ds.volume.sel(rgi_id=gd.rgi_id))
         assert_allclose(ds_diag.area_m2, ds.area.sel(rgi_id=gd.rgi_id))
         assert_allclose(ds_diag.length_m, ds.length.sel(rgi_id=gd.rgi_id))
@@ -379,7 +360,7 @@ class TestWorkflow(unittest.TestCase):
         df['RUN'] = ds_diag.volume_m3.to_series()
         assert_allclose(df.RUN, df.OUT)
 
-    @is_slow
+    @pytest.mark.slow
     def test_random_mb_seed(self):
         gdirs = up_to_inversion()
         seed = None
@@ -398,8 +379,8 @@ class TestWorkflow(unittest.TestCase):
         self.assertGreaterEqual(odf.corr().mean().mean(), 0.9)
 
 
-@is_slow
-@is_graphic_test
+@pytest.mark.slow
+@pytest.mark.graphic
 @pytest.mark.mpl_image_compare(baseline_dir=BASELINE_DIR, tolerance=25)
 def test_plot_region_inversion():
 
@@ -421,8 +402,8 @@ def test_plot_region_inversion():
     return fig
 
 
-@is_slow
-@is_graphic_test
+@pytest.mark.slow
+@pytest.mark.graphic
 @pytest.mark.mpl_image_compare(baseline_dir=BASELINE_DIR, tolerance=25)
 def test_plot_region_model():
 

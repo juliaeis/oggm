@@ -46,6 +46,7 @@ the majority of OGGM's tasks). They are parallelizable.
     tasks.catchment_width_geom
     tasks.catchment_width_correction
     tasks.process_cru_data
+    tasks.process_histalp_data
     tasks.process_custom_climate_data
     tasks.process_cesm_data
     tasks.local_mustar
@@ -54,7 +55,9 @@ the majority of OGGM's tasks). They are parallelizable.
     tasks.mu_candidates
     tasks.prepare_for_inversion
     tasks.volume_inversion
-    tasks.distribute_thickness
+    tasks.filter_inversion_output
+    tasks.distribute_thickness_per_altitude
+    tasks.distribute_thickness_interp
     tasks.init_present_time_glacier
     tasks.run_random_climate
     tasks.run_constant_climate
@@ -71,7 +74,6 @@ glaciers in the current run). They are not parallelizable.
     :nosignatures:
 
     tasks.compute_ref_t_stars
-    tasks.distribute_t_stars
     tasks.crossval_t_stars
     tasks.optimize_inversion_params
 
@@ -142,7 +144,7 @@ Interface
     MassBalanceModel.get_monthly_mb
     MassBalanceModel.get_annual_mb
     MassBalanceModel.get_specific_mb
-    MassBalanceModel.temp_bias
+    MassBalanceModel.get_ela
 
 Models
 ------
@@ -155,3 +157,4 @@ Models
     PastMassBalance
     ConstantMassBalance
     RandomMassBalance
+    UncertainMassBalance

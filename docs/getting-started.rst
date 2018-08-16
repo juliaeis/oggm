@@ -31,6 +31,7 @@ The following imports are necessary for all of the examples:
 
     import geopandas as gpd
     import oggm
+    import os
     from oggm import cfg, tasks, graphics
     from oggm.utils import get_demo_file
 
@@ -73,7 +74,7 @@ In this case we use a very small subset of the RGI, the outlines of the
 
 .. ipython:: python
 
-    entity = gpd.GeoDataFrame.from_file(get_demo_file('HEF_MajDivide.shp')).iloc[0]
+    entity = gpd.read_file(get_demo_file('HEF_MajDivide.shp')).iloc[0]
     entity
 
 This information is enough to define HEF's :py:class:`GlacierDirectory`:
@@ -132,6 +133,6 @@ You will find several notebooks:
 - ``flowline_with_known_bedrock.ipynb``, which describes the usage of the
   flowline model with custom boundary conditions.
 - ``specmb_vs_ela.ipynb``, which was used to make the analyses presented in
-  `this blog post <http://oggm.org/2017/10/01/specmb-ela/>`_
+  `this blog post about the non linear relationship between specific mass-balance and glacier geometry <http://oggm.org/2017/10/01/specmb-ela/>`_
 - ``dynamics_and_length_changes.ipynb``, which was used to make the analyses
-  presented in `this blog post <http://oggm.org/2017/10/23/length-changes/>`_
+  presented in `this blog post about the long term length changes of glaciers <http://oggm.org/2017/10/23/length-changes/>`_

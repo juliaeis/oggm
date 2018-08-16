@@ -23,7 +23,7 @@ import oggm.core.massbalance as mbmods
 from oggm.core.centerlines import Centerline, line_order
 
 # Constants
-from oggm.cfg import SEC_IN_DAY, SEC_IN_YEAR, TWO_THIRDS, SEC_IN_HOUR
+from oggm.cfg import SEC_IN_DAY, SEC_IN_YEAR, SEC_IN_HOUR
 from oggm.cfg import RHO, G, N, GAUSSIAN_KERNEL
 
 # Module logger
@@ -149,11 +149,11 @@ class ParabolicBedFlowline(Flowline):
 
     @property
     def section(self):
-        return TWO_THIRDS * self.widths_m * self.thick
+        return 2./3. * self.widths_m * self.thick
 
     @section.setter
     def section(self, val):
-        self.thick = (0.75 * val * np.sqrt(self.bed_shape))**TWO_THIRDS
+        self.thick = (0.75 * val * np.sqrt(self.bed_shape))**(2./3.)
 
     def _add_attrs_to_dataset(self, ds):
         """Add bed specific parameters."""
@@ -338,7 +338,7 @@ class MixedBedFlowline(Flowline):
 
     @property
     def section(self):
-        out = TWO_THIRDS * self.widths_m * self.thick
+        out = 2./3. * self.widths_m * self.thick
         if self._do_trapeze:
             out[self._ptrap] = ((self.widths_m[self._ptrap] +
                                  self._w0_m[self._ptrap]) / 2 *
@@ -347,7 +347,7 @@ class MixedBedFlowline(Flowline):
 
     @section.setter
     def section(self, val):
-        out = (0.75 * val * self._sqrt_bed)**TWO_THIRDS
+        out = (0.75 * val * self._sqrt_bed)**(2./3.)
         if self._do_trapeze:
             b = 2 * self._w0_m[self._ptrap]
             a = 2 * self._lambdas[self._ptrap]
@@ -636,7 +636,8 @@ class  FlowlineModel(object):
             if np.any(~np.isfinite(fl.thick)):
                 raise FloatingPointError('NaN in numerical solution.')
 
-    def run_until_and_store(self, y1, run_path=None, diag_path=None):
+    def run_until_and_store(self, y1, run_path=None, diag_path=None,
+                            store_monthly_step=False):
         """Runs the model and returns intermediate steps in xarray datasets.
 
         The function returns two datasets:
@@ -654,8 +655,12 @@ class  FlowlineModel(object):
         """
 
         # time
-        monthly_time = utils.monthly_timeseries(self.yr, y1)
         yearly_time = np.arange(np.floor(self.yr), np.floor(y1)+1)
+
+        if store_monthly_step:
+            monthly_time = utils.monthly_timeseries(self.yr, y1)
+        else:
+            monthly_time = np.arange(np.floor(self.yr), np.floor(y1)+1)
         yrs, months = utils.floatyear_to_date(monthly_time)
         cyrs, cmonths = utils.hydrodate_to_calendardate(yrs, months)
 
@@ -759,6 +764,13 @@ class  FlowlineModel(object):
         return run_ds, diag_ds
 
     def run_until_equilibrium(self, rate=0.001, ystep=5, max_ite=200):
+        """ Runs the model until an equilibrium state is reached.
+        
+        Be careful: This only works for CONSTANT (not time-dependant) 
+        mass-balance models.
+        Otherwise the returned state will not be in equilibrium! Don't try to
+        calculate an equilibrium state with a RandomMassBalance model!
+        """
 
         ite = 0
         was_close_zero = 0
@@ -828,6 +840,17 @@ class FluxBasedModel(FlowlineModel):
         self.cfl_number = cfl_number
         self.calving_m3_since_y0 = 0.  # total calving since time y0
 
+        # Do we want to use shape factors?
+        self.sf_func = None
+        # Use .get to obtain default None for non-existing key
+        # necessary to pass some tests
+        # TODO: change to direct dictionary query after tests are adapted?
+        use_sf = cfg.PARAMS.get('use_shape_factor_for_fluxbasedmodel')
+        if use_sf == 'Adhikari' or use_sf == 'Nye':
+            self.sf_func = utils.shape_factor_adhikari
+        elif use_sf == 'Huss':
+            self.sf_func = utils.shape_factor_huss
+
         # Optim
         self._stags = []
         for fl, trib in zip(self.fls, self._trib):
@@ -839,9 +862,10 @@ class FluxBasedModel(FlowlineModel):
             a = np.zeros(nx+1)
             b = np.zeros(nx+1)
             c = np.zeros(nx+1)
-            d = np.zeros(nx-1)
-            e = np.zeros(nx)
-            self._stags.append((a, b, c, d, e))
+            d = np.ones(nx+1)  # shape factor default is 1
+            e = np.zeros(nx-1)
+            f = np.zeros(nx)
+            self._stags.append((a, b, c, d, e, f))
 
     def step(self, dt):
         """Advance one step."""
@@ -852,8 +876,9 @@ class FluxBasedModel(FlowlineModel):
         # Loop over tributaries to determine the flux rate
         flxs = []
         aflxs = []
-        for fl, trib, (slope_stag, thick_stag, section_stag, znxm1, znx) \
-                in zip(self.fls, self._trib, self._stags):
+
+        for fl, trib, (slope_stag, thick_stag, section_stag, sf_stag,
+                       znxm1, znx) in zip(self.fls, self._trib, self._stags):
 
             surface_h = fl.surface_h
             thick = fl.thick
@@ -893,10 +918,20 @@ class FluxBasedModel(FlowlineModel):
             thick_stag[1:-1] = (thick[0:-1] + thick[1:]) / 2.
             thick_stag[[0, -1]] = thick[[0, -1]]
 
+            if self.sf_func is not None:
+                # TODO: maybe compute new shape factors only every year?
+                sf = self.sf_func(fl.widths_m, fl.thick, fl.is_rectangular)
+                if is_trib or self.is_tidewater:
+                    # for water termination or inflowing tributary, the sf
+                    # makes no sense
+                    sf = np.append(sf, 1.)
+                sf_stag[1:-1] = (sf[0:-1] + sf[1:]) / 2.
+                sf_stag[[0, -1]] = sf[[0, -1]]
+
             # Staggered velocity (Deformation + Sliding)
             # _fd = 2/(N+2) * self.glen_a
             rhogh = (RHO*G*slope_stag)**N
-            u_stag = (thick_stag**(N+1)) * self._fd * rhogh + \
+            u_stag = (thick_stag**(N+1)) * self._fd * rhogh * sf_stag**N + \
                      (thick_stag**(N-1)) * self.fs * rhogh
 
             # Staggered section
@@ -934,7 +969,7 @@ class FluxBasedModel(FlowlineModel):
 
         # A second loop for the mass exchange
         for fl, flx_stag, aflx, trib in zip(self.fls, flxs, aflxs,
-                                                 self._trib):
+                                            self._trib):
 
             dx = fl.dx_meter
 
@@ -1636,7 +1671,7 @@ def init_present_time_glacier(gdir):
 
 def robust_model_run(gdir, output_filesuffix=None, mb_model=None,
                      ys=None, ye=None, zero_initial_glacier=False,
-                     init_model_fls=None,
+                     init_model_fls=None, store_monthly_step=False,
                      **kwargs):
     """Trial-error-and-retry algorithm to run the flowline model.
 
@@ -1692,7 +1727,8 @@ def robust_model_run(gdir, output_filesuffix=None, mb_model=None,
                                **kwargs)
         try:
             model.run_until_and_store(ye, run_path=run_path,
-                                      diag_path=diag_path)
+                                      diag_path=diag_path,
+                                      store_monthly_step=store_monthly_step)
         except (RuntimeError, FloatingPointError):
             if step == 'ultra-conservative':
                 raise
@@ -1706,10 +1742,12 @@ def robust_model_run(gdir, output_filesuffix=None, mb_model=None,
 @entity_task(log)
 def run_random_climate(gdir, nyears=1000, y0=None, halfsize=15,
                        bias=None, seed=None, temperature_bias=None,
+                       store_monthly_step=False,
                        climate_filename='climate_monthly',
                        climate_input_filesuffix='',
                        output_filesuffix='', init_model_fls=None,
                        zero_initial_glacier=False,
+                       unique_samples=False,
                        **kwargs):
     """Runs the random mass-balance model for a given number of years.
 
@@ -1732,6 +1770,9 @@ def run_random_climate(gdir, nyears=1000, y0=None, halfsize=15,
         be usefull if you want to have the same climate years for all of them
     temperature_bias : float
         add a bias to the temperature timeseries
+    store_monthly_step : bool
+        whether to store the diagnostic data at a monthly time step or not
+        (default is yearly)
     climate_filename : str
         name of the climate file, e.g. 'climate_monthly' (default) or
         'cesm_data'
@@ -1745,6 +1786,11 @@ def run_random_climate(gdir, nyears=1000, y0=None, halfsize=15,
         present_time_glacier file from the glacier directory)
     zero_initial_glacier : bool
         if true, the ice thickness is set to zero before the simulation
+    unique_samples: bool
+        if true, chosen random mass-balance years will only be available once
+        per random climate period-length
+        if false, every model year will be chosen from the random climate
+        period with the same probability
     kwargs : dict
         kwargs to pass to the FluxBasedModel instance
     """
@@ -1752,12 +1798,14 @@ def run_random_climate(gdir, nyears=1000, y0=None, halfsize=15,
     mb = mbmods.RandomMassBalance(gdir, y0=y0, halfsize=halfsize,
                                   bias=bias, seed=seed,
                                   filename=climate_filename,
-                                  input_filesuffix=climate_input_filesuffix)
+                                  input_filesuffix=climate_input_filesuffix,
+                                  unique_samples=unique_samples)
     if temperature_bias is not None:
         mb.temp_bias = temperature_bias
 
     return robust_model_run(gdir, output_filesuffix=output_filesuffix,
                             mb_model=mb, ys=0, ye=nyears,
+                            store_monthly_step=store_monthly_step,
                             init_model_fls=init_model_fls,
                             zero_initial_glacier=zero_initial_glacier,
                             **kwargs)
@@ -1766,6 +1814,7 @@ def run_random_climate(gdir, nyears=1000, y0=None, halfsize=15,
 @entity_task(log)
 def run_constant_climate(gdir, nyears=1000, y0=None, halfsize=15,
                          bias=None, temperature_bias=None,
+                         store_monthly_step=False,
                          output_filesuffix='',
                          climate_filename='climate_monthly',
                          climate_input_filesuffix='',
@@ -1790,6 +1839,9 @@ def run_constant_climate(gdir, nyears=1000, y0=None, halfsize=15,
         to zero
     temperature_bias : float
         add a bias to the temperature timeseries
+    store_monthly_step : bool
+        whether to store the diagnostic data at a monthly time step or not
+        (default is yearly)
     climate_filename : str
         name of the climate file, e.g. 'climate_monthly' (default) or
         'cesm_data'
@@ -1815,6 +1867,7 @@ def run_constant_climate(gdir, nyears=1000, y0=None, halfsize=15,
 
     return robust_model_run(gdir, output_filesuffix=output_filesuffix,
                             mb_model=mb, ys=0, ye=nyears,
+                            store_monthly_step=store_monthly_step,
                             init_model_fls=init_model_fls,
                             zero_initial_glacier=zero_initial_glacier,
                             **kwargs)
@@ -1822,6 +1875,7 @@ def run_constant_climate(gdir, nyears=1000, y0=None, halfsize=15,
 
 @entity_task(log)
 def run_from_climate_data(gdir, ys=None, ye=None,
+                          store_monthly_step=False,
                           climate_filename='climate_monthly',
                           climate_input_filesuffix='', output_filesuffix='',
                           init_model_filesuffix=None, init_model_yr=None,
@@ -1833,8 +1887,11 @@ def run_from_climate_data(gdir, ys=None, ye=None,
     ----------
     ys : int
         start year of the model run (default: from the config file)
-    y1 : int
+    ye : int
         end year of the model run (default: from the config file)
+    store_monthly_step : bool
+        whether to store the diagnostic data at a monthly time step or not
+        (default is yearly)
     climate_filename : str
         name of the climate file, e.g. 'climate_monthly' (default) or
         'cesm_data'
@@ -1865,17 +1922,18 @@ def run_from_climate_data(gdir, ys=None, ye=None,
 
     if init_model_filesuffix is not None:
         fp = gdir.get_filepath('model_run', filesuffix=init_model_filesuffix)
-        fmod = FileModel(fp)
-        if init_model_yr is None:
-            init_model_yr = fmod.last_yr
-        fmod.run_until(init_model_yr)
-        init_model_fls = fmod.fls
+        with FileModel(fp) as fmod:
+            if init_model_yr is None:
+                init_model_yr = fmod.last_yr
+            fmod.run_until(init_model_yr)
+            init_model_fls = fmod.fls
 
     mb = mbmods.PastMassBalance(gdir, filename=climate_filename,
                                 input_filesuffix=climate_input_filesuffix)
 
     return robust_model_run(gdir, output_filesuffix=output_filesuffix,
                             mb_model=mb, ys=ys, ye=ye,
+                            store_monthly_step=store_monthly_step,
                             init_model_fls=init_model_fls,
                             zero_initial_glacier=zero_initial_glacier,
                             **kwargs)

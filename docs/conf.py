@@ -16,6 +16,7 @@ from __future__ import print_function
 import sys
 import os
 import shutil
+import datetime
 
 
 print("python version:", sys.version)
@@ -84,11 +85,6 @@ try:
 except ImportError:
     print("no netCDF4")
 try:
-    import joblib
-    print("joblib: %s, %s" % (joblib.__version__, joblib.__file__))
-except ImportError:
-    print("no joblib")
-try:
     import skimage
     print("skimage: %s, %s" % (skimage.__version__, skimage.__file__))
 except ImportError:
@@ -146,7 +142,7 @@ master_doc = 'index'
 
 # General information about the project.
 project = 'OGGM'
-copyright = '2015-2016, OGGM Developers'
+copyright = '2015-{}, OGGM Developers'.format(datetime.datetime.now().year)
 author = 'OGGM Developers'
 
 # The version info for the project you're documenting, acts as replacement for
@@ -154,7 +150,7 @@ author = 'OGGM Developers'
 # built documents.
 #
 # The short X.Y version.
-version = oggm.version.short_version
+version = oggm.__version__.split('+')[0]
 # The full version, including alpha/beta/rc tags.
 release = oggm.__version__
 
@@ -207,20 +203,15 @@ pygments_style = 'sphinx'
 
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
-
-# on_rtd is whether we are on readthedocs.org, this line of code grabbed from
-# docs.readthedocs.org
-
-on_rtd = os.environ.get('READTHEDOCS', None) == 'True'
-if not on_rtd:  # only import and set the theme if we're building docs locally
-    import sphinx_rtd_theme
-    html_theme = 'sphinx_rtd_theme'
-    html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
+html_theme = 'sphinx_rtd_theme'
 
 # Theme options are theme-specific and customize the look and feel of a theme
 # further.  For a list of options available for each theme, see the
 # documentation.
-#html_theme_options = {}
+html_theme_options = {
+    'logo_only': True,
+    'display_version': False,
+}
 
 # Add any paths that contain custom themes here, relative to this directory.
 #html_theme_path = []
@@ -234,12 +225,12 @@ if not on_rtd:  # only import and set the theme if we're building docs locally
 
 # The name of an image file (relative to this directory) to place at the top
 # of the sidebar.
-#html_logo = None
+html_logo = '_static/logo.png'
 
 # The name of an image file (within the static path) to use as favicon of the
 # docs.  This file should be a Windows icon file (.ico) being 16x16 or 32x32
 # pixels large.
-#html_favicon = None
+html_favicon = '_static/favicon.ico'
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
@@ -401,7 +392,7 @@ texinfo_documents = [
 
 # Example configuration for intersphinx: refer to the Python standard library.
 intersphinx_mapping = {
-    'python': ('https://docs.python.org/3.5/', None),
+    'python': ('https://docs.python.org/3.6/', None),
     'pandas': ('http://pandas.pydata.org/pandas-docs/stable/', None),
     'numpy': ('http://docs.scipy.org/doc/numpy/', None),
 }
@@ -430,7 +421,7 @@ def write_index():
     origfile = os.path.join(here, 'templates/index.txt')
     filename = os.path.join(here, 'index.rst')
 
-    text = text_version if oggm.__isreleased__ else text_dev
+    text = text_version if '+' not in oggm.__version__ else text_dev
     with open(origfile) as f1:
         with open(filename, 'w') as f2:
             for line in f1:

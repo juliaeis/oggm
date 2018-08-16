@@ -3,13 +3,13 @@
 |
 
 
-Extending `Marzeion et al., (2012)`_, the model accounts for glacier geometry 
-(including contributory branches) and includes an explicit ice dynamics module.
-It can simulate past and future mass-balance, volume and geometry of (almost)
-any glacier in the world in a fully automated workflow. We rely exclusively on
-publicly available data for calibration and validation.
+**OGGM is a modular open source model for glacier dynamics**
 
-.. _Marzeion et al., (2012): http://www.the-cryosphere.net/6/1295/2012/tc-6-1295-2012.html
+The model accounts for glacier geometry (including contributory branches) and
+includes an explicit ice dynamics module. It can simulate past and
+future mass-balance, volume and geometry of (almost) any glacier in the world
+in a fully automated and extensible workflow. We rely exclusively on publicly
+available data for calibration and validation.
 
 
 .. image:: docs/_static/ex_tasman.jpg
@@ -27,18 +27,20 @@ Get in touch
 - View the source code `on GitHub`_.
 - Report bugs or share your ideas on the `issue tracker`_.
 - Improve the model by submitting a `pull request`_.
+- Follow us on `Twitter`_.
 - Or you can always send us an `e-mail`_ the good old way.
 
 .. _e-mail: info@oggm.org
 .. _on GitHub: https://github.com/OGGM/oggm
 .. _issue tracker: https://github.com/OGGM/oggm/issues
 .. _pull request: https://github.com/OGGM/oggm/pulls
+.. _Twitter: https://twitter.com/OGGM1
 
 
 About
 -----
 
-:Status:
+:Version:
     .. image:: https://img.shields.io/pypi/v/oggm.svg
         :target: https://pypi.python.org/pypi/oggm
         :alt: Pypi version
@@ -48,6 +50,10 @@ About
         :alt: Supported python versions
 
 :Citation:
+    .. image:: https://img.shields.io/badge/Citation-GMD%20paper-orange.svg
+        :target: https://www.geosci-model-dev-discuss.net/gmd-2018-9/
+        :alt: GMD Paper
+
     .. image:: https://zenodo.org/badge/43965645.svg
         :target: https://zenodo.org/badge/latestdoi/43965645
         :alt: Zenodo
@@ -68,6 +74,10 @@ About
     .. image:: https://readthedocs.org/projects/oggm/badge/?version=latest
         :target: http://oggm.readthedocs.org/en/latest/?badge=latest
         :alt: Documentation status
+
+    .. image:: http://img.shields.io/badge/benchmarked%20by-asv-green.svg?style=flat
+        :target: https://cluster.klima.uni-bremen.de/~github/asv/
+        :alt: Benchmark status
 
 :License:
     .. image:: https://img.shields.io/pypi/l/oggm.svg

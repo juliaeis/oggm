@@ -23,7 +23,6 @@ from collections import Counter
 import numpy as np
 import pandas as pd
 import salem
-import netCDF4
 import shapely.ops
 import geopandas as gpd
 import scipy.signal
@@ -59,16 +58,7 @@ class Centerline(object):
     """
 
     def __init__(self, line, dx=None, surface_h=None, orig_head=None):
-        """ Instanciate.
-
-        Parameters
-        ----------
-        line: Shapely LineString
-
-        Properties
-        ----------
-        #TODO: document properties
-        """
+        """ Instantiate."""
 
         self.line = None  # Shapely LineString
         self.head = None  # Shapely Point
@@ -327,8 +317,8 @@ def _filter_heads(heads, heads_height, radius, polygon):
         elif inter_poly.type is 'Polygon':
             pass
         else:
-            extext ='Geometry collection not expected: {}'.format(
-                inter_poly.type)
+            extext = ('Geometry collection not expected: '
+                      '{}'.format(inter_poly.type))
             raise NotImplementedError(extext)
 
         # Find other points in radius and in polygon
@@ -648,8 +638,21 @@ def _get_terminus_coord(gdir, ext_yx, zoutline):
         ind = np.where((zoutline < plow) & (zoutline < (mini + deltah)))[0]
 
         # We take the middle of this area
-        ind_term = ind[np.round(len(ind) / 2.).astype(np.int)]
-
+        try:
+            ind_term = ind[np.round(len(ind) / 2.).astype(np.int)]
+        except IndexError:
+            # Sometimes the default perc is not large enough
+            try:
+                # Repeat
+                perc *= 2
+                plow = np.percentile(zoutline, perc).astype(np.int64)
+                mini = np.min(zoutline)
+                ind = np.where((zoutline < plow) &
+                               (zoutline < (mini + deltah)))[0]
+                ind_term = ind[np.round(len(ind) / 2.).astype(np.int)]
+            except IndexError:
+                # Last resort
+                ind_term = np.argmin(zoutline)
     else:
         # easy: just the minimum
         ind_term = np.argmin(zoutline)
@@ -781,7 +784,7 @@ def compute_centerlines(gdir, heads=None):
     # open
     geom = gdir.read_pickle('geometries')
     grids_file = gdir.get_filepath('gridded_data')
-    with netCDF4.Dataset(grids_file) as nc:
+    with utils.ncDataset(grids_file) as nc:
         # Variables
         glacier_mask = nc.variables['glacier_mask'][:]
         glacier_ext = nc.variables['glacier_ext'][:]
@@ -793,7 +796,11 @@ def compute_centerlines(gdir, heads=None):
     ext_yx = tuple(reversed(poly_pix.exterior.xy))
     zoutline = topo[y[:-1], x[:-1]]  # last point is first point
 
+    # For diagnostics
+    is_first_call = False
     if heads is None:
+        # This is the default for when no filter is yet applied
+        is_first_call = True
         heads = _get_centerlines_heads(gdir, ext_yx, zoutline, single_fl,
                                        glacier_mask, topo, geom, poly_pix)
 
@@ -844,8 +851,12 @@ def compute_centerlines(gdir, heads=None):
     # Write the data
     gdir.write_pickle(cls, 'centerlines')
 
+    if is_first_call:
+        # For diagnostics of filtered centerlines
+        gdir.add_to_diagnostics('n_orig_centerlines', len(cls))
+
     # Netcdf
-    with netCDF4.Dataset(grids_file, 'a') as nc:
+    with utils.ncDataset(grids_file, 'a') as nc:
         if 'cost_grid' in nc.variables:
             # Overwrite
             nc.variables['cost_grid'][:] = costgrid
@@ -877,7 +888,7 @@ def compute_downstream_line(gdir):
     if gdir.is_tidewater:
         return
 
-    with netCDF4.Dataset(gdir.get_filepath('gridded_data')) as nc:
+    with utils.ncDataset(gdir.get_filepath('gridded_data')) as nc:
         topo = nc.variables['topo_smoothed'][:]
         glacier_ext = nc.variables['glacier_ext'][:]
 
@@ -1104,7 +1115,7 @@ def compute_downstream_bedshape(gdir):
     cl = Centerline(cl, dx=tpl.dx)
        
     # Topography
-    with netCDF4.Dataset(gdir.get_filepath('gridded_data')) as nc:
+    with utils.ncDataset(gdir.get_filepath('gridded_data')) as nc:
         topo = nc.variables['topo_smoothed'][:]
         x = nc.variables['x'][:]
         y = nc.variables['y'][:]
@@ -1370,7 +1381,7 @@ def catchment_area(gdir):
     geoms = gdir.read_pickle('geometries')
     glacier_pix = geoms['polygon_pix']
     fpath = gdir.get_filepath('gridded_data')
-    with netCDF4.Dataset(fpath) as nc:
+    with utils.ncDataset(fpath) as nc:
         costgrid = nc.variables['cost_grid'][:]
         mask = nc.variables['glacier_mask'][:]
 
@@ -1526,7 +1537,7 @@ def initialize_flowlines(gdir):
 
     # Topo for heights
     fpath = gdir.get_filepath('gridded_data')
-    with netCDF4.Dataset(fpath) as nc:
+    with utils.ncDataset(fpath) as nc:
         topo = nc.variables['topo_smoothed'][:]
 
     # Bilinear interpolation
@@ -1538,7 +1549,8 @@ def initialize_flowlines(gdir):
 
     # Smooth window
     sw = cfg.PARAMS['flowline_height_smooth']
-
+    diag_n_bad_slopes = 0
+    diag_n_pix = 0
     for ic, cl in enumerate(cls):
         points = line_interpol(cl.line, dx)
 
@@ -1561,7 +1573,10 @@ def initialize_flowlines(gdir):
             # Correct only where glacier
             hgts = _filter_small_slopes(hgts, dx*gdir.grid.dx)
             isfin = np.isfinite(hgts)
-            assert np.any(isfin)
+            if not np.any(isfin):
+                raise RuntimeError('This line has no positive slopes')
+            diag_n_bad_slopes += np.sum(~isfin)
+            diag_n_pix += len(isfin)
             perc_bad = np.sum(~isfin) / len(isfin)
             if perc_bad > 0.8:
                 log.warning('({}) more than {:.0%} of the flowline is cropped '
@@ -1589,6 +1604,9 @@ def initialize_flowlines(gdir):
 
     # Write the data
     gdir.write_pickle(fls, 'inversion_flowlines')
+    if do_filter:
+        out = diag_n_bad_slopes/diag_n_pix
+        gdir.add_to_diagnostics('perc_invalid_flowline', out)
 
 
 @entity_task(log, writes=['inversion_flowlines'])
@@ -1610,7 +1628,7 @@ def catchment_width_geom(gdir):
     # I take the non-smoothed topography
     # I remove the boundary pixs because they are likely to be higher
     fpath = gdir.get_filepath('gridded_data')
-    with netCDF4.Dataset(fpath) as nc:
+    with utils.ncDataset(fpath) as nc:
         topo = nc.variables['topo'][:]
         mask_ext = nc.variables['glacier_ext'][:]
         mask_glacier = nc.variables['glacier_mask'][:]
@@ -1722,7 +1740,7 @@ def catchment_width_correction(gdir):
     # Topography for altitude-area distribution
     # I take the non-smoothed topography and remove the borders
     fpath = gdir.get_filepath('gridded_data')
-    with netCDF4.Dataset(fpath) as nc:
+    with utils.ncDataset(fpath) as nc:
         topo = nc.variables['topo'][:]
         ext = nc.variables['glacier_ext'][:]
     topo[np.where(ext==1)] = np.NaN
@@ -1747,17 +1765,17 @@ def catchment_width_correction(gdir):
         # Get topo per catchment and per flowline point
         fhgt = fl.surface_h
 
-        # Sometimes, the centerline does not reach as high as each pix on the
-        # glacier. (e.g. RGI40-11.00006)
-        catch_h = np.clip(catch_h, 0, np.max(fhgt))
-
         # Max and mins for the histogram
         maxh = np.max(fhgt)
+        minh = np.min(fhgt)
+
+        # Sometimes, the centerline does not reach as high as each pix on the
+        # glacier. (e.g. RGI40-11.00006)
+        catch_h = np.clip(catch_h, np.min(catch_h), maxh)
+        # Same for min
         if fl.flows_to is None:
-            minh = np.min(fhgt)
+            # We clip only for main flowline (this has reasons)
             catch_h = np.clip(catch_h, minh, np.max(catch_h))
-        else:
-            minh = np.min(fhgt)  # Min just for flowline (this has reasons)
 
         # Now decide on a binsize which ensures at least N element per bin
         bsize = cfg.PARAMS['base_binsize']

@@ -1,4 +1,5 @@
 """Useful plotting functions"""
+import os
 import functools
 import logging
 from collections import OrderedDict
@@ -7,13 +8,13 @@ import itertools
 import geopandas as gpd
 import matplotlib.colors as colors
 import matplotlib.pyplot as plt
-import netCDF4
 import numpy as np
 import salem
 import shapely.geometry as shpg
 from matplotlib import cm as colormap
 
 from oggm.core.flowline import FileModel
+from oggm import cfg, utils
 
 # Module logger
 log = logging.getLogger(__name__)
@@ -83,6 +84,9 @@ def _plot_map(plotfunc):
         pass kwargs to salem.Map.set_lonlat_contours
     cbar_ax: ax, optional
         ax where to plot the colorbar
+    autosave : bool, optional
+        set to True to override to a default savefig filename (useful 
+        for multiprocessing)
     savefig : str, optional
         save the figure to a file instead of displaying it
     savefig_kwargs : dict, optional
@@ -95,7 +99,7 @@ def _plot_map(plotfunc):
     @functools.wraps(plotfunc)
     def newplotfunc(gdirs, ax=None, smap=None, add_colorbar=True, title=None,
                     title_comment=None, horizontal_colorbar=False,
-                    lonlat_contours_kwargs=None, cbar_ax=None,
+                    lonlat_contours_kwargs=None, cbar_ax=None, autosave=False,
                     add_scalebar=True, savefig=None, savefig_kwargs=None,
                     **kwargs):
 
@@ -156,6 +160,12 @@ def _plot_map(plotfunc):
         if dofig:
             plt.tight_layout()
 
+        if autosave:
+            savefig = os.path.join(cfg.PATHS['working_dir'], 'plots')
+            utils.mkdir(savefig)
+            savefig = os.path.join(savefig, plotfunc.__name__ + '_' +
+                                   gdirs[0].rgi_id + '.png')
+
         if savefig is not None:
             plt.savefig(savefig, savefig_kwargs=savefig_kwargs)
             plt.close()
@@ -207,7 +217,7 @@ def plot_domain(gdirs, ax=None, smap=None):
 
     # Files
     gdir = gdirs[0]
-    with netCDF4.Dataset(gdir.get_filepath('gridded_data')) as nc:
+    with utils.ncDataset(gdir.get_filepath('gridded_data')) as nc:
         topo = nc.variables['topo'][:]
 
     try:
@@ -249,7 +259,7 @@ def plot_centerlines(gdirs, ax=None, smap=None, use_flowlines=False,
         filename = 'inversion_flowlines'
 
     gdir = gdirs[0]
-    with netCDF4.Dataset(gdir.get_filepath('gridded_data')) as nc:
+    with utils.ncDataset(gdir.get_filepath('gridded_data')) as nc:
         topo = nc.variables['topo'][:]
 
     cm = truncate_colormap(colormap.terrain, minval=0.25, maxval=1.0, n=256)
@@ -305,7 +315,7 @@ def plot_catchment_areas(gdirs, ax=None, smap=None, lines_cmap='Set1',
     if len(gdirs) > 1:
         raise NotImplementedError('Cannot plot a list of gdirs (yet)')
 
-    with netCDF4.Dataset(gdir.get_filepath('gridded_data')) as nc:
+    with utils.ncDataset(gdir.get_filepath('gridded_data')) as nc:
         topo = nc.variables['topo'][:]
         mask = nc.variables['glacier_mask'][:] * np.NaN
 
@@ -348,7 +358,7 @@ def plot_catchment_width(gdirs, ax=None, smap=None, corrected=False,
     """
 
     gdir = gdirs[0]
-    with netCDF4.Dataset(gdir.get_filepath('gridded_data')) as nc:
+    with utils.ncDataset(gdir.get_filepath('gridded_data')) as nc:
         topo = nc.variables['topo'][:]
     # Dirty optim
     try:
@@ -418,7 +428,7 @@ def plot_inversion(gdirs, ax=None, smap=None, linewidth=3, vmax=None):
     """Plots the result of the inversion out of a glacier directory."""
 
     gdir = gdirs[0]
-    with netCDF4.Dataset(gdir.get_filepath('gridded_data')) as nc:
+    with utils.ncDataset(gdir.get_filepath('gridded_data')) as nc:
         topo = nc.variables['topo'][:]
 
     # Dirty optim
@@ -471,7 +481,7 @@ def plot_inversion(gdirs, ax=None, smap=None, linewidth=3, vmax=None):
 
 
 @_plot_map
-def plot_distributed_thickness(gdirs, ax=None, smap=None, how=None):
+def plot_distributed_thickness(gdirs, ax=None, smap=None, varname_suffix=''):
     """Plots the result of the inversion out of a glacier directory.
 
     Method: 'alt' or 'interp'
@@ -481,16 +491,18 @@ def plot_distributed_thickness(gdirs, ax=None, smap=None, how=None):
     if len(gdirs) > 1:
         raise NotImplementedError('Cannot plot a list of gdirs (yet)')
 
-    with netCDF4.Dataset(gdir.get_filepath('gridded_data')) as nc:
+    with utils.ncDataset(gdir.get_filepath('gridded_data')) as nc:
         topo = nc.variables['topo'][:]
         mask = nc.variables['glacier_mask'][:]
 
     grids_file = gdir.get_filepath('gridded_data')
-    with netCDF4.Dataset(grids_file) as nc:
-        vn = 'thickness'
-        if how is not None:
-            vn += '_' + how
-        thick = nc.variables[vn][:]
+    with utils.ncDataset(grids_file) as nc:
+        import warnings
+        with warnings.catch_warnings():
+            # https://github.com/Unidata/netcdf4-python/issues/766
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            vn = 'distributed_thickness' + varname_suffix
+            thick = nc.variables[vn][:]
 
     thick = np.where(mask, thick, np.NaN)
 
@@ -522,7 +534,7 @@ def plot_modeloutput_map(gdirs, ax=None, smap=None, model=None,
     """Plots the result of the model output."""
 
     gdir = gdirs[0]
-    with netCDF4.Dataset(gdir.get_filepath('gridded_data')) as nc:
+    with utils.ncDataset(gdir.get_filepath('gridded_data')) as nc:
         topo = nc.variables['topo'][:]
 
     # Dirty optim

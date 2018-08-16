@@ -7,17 +7,18 @@ logging.basicConfig(format='%(asctime)s: %(name)s: %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S', level=logging.DEBUG)
 
 import unittest
+import pytest
 import copy
 import time
 import pandas as pd
 from numpy.testing import assert_allclose
+import pytest
 
 # Local imports
 from oggm.core import massbalance
 from oggm.core.massbalance import LinearMassBalance
-from oggm.tests import is_slow, RUN_MODEL_TESTS
 import xarray as xr
-from oggm import utils, workflow
+from oggm import utils, workflow, tasks
 from oggm.cfg import N, SEC_IN_DAY, SEC_IN_YEAR, SEC_IN_MONTH
 
 # Tests
@@ -26,10 +27,7 @@ from oggm.tests.funcs import *
 # after oggm.test
 import matplotlib.pyplot as plt
 
-# do we event want to run the tests?
-if not RUN_MODEL_TESTS:
-    raise unittest.SkipTest('Skipping all model tests.')
-
+pytestmark = pytest.mark.test_env("models")
 do_plot = False
 
 DOM_BORDER = 80
@@ -38,14 +36,22 @@ DOM_BORDER = 80
 class TestInitFlowline(unittest.TestCase):
 
     def setUp(self):
-        pass
+        gdir = init_hef(border=DOM_BORDER)
+        self.testdir = os.path.join(get_test_dir(), type(self).__name__)
+        utils.mkdir(self.testdir, reset=True)
+        self.gdir = tasks.copy_to_basedir(gdir, base_dir=self.testdir,
+                                          setup='all')
 
     def tearDown(self):
-        pass
+        self.rm_dir()
+
+    def rm_dir(self):
+        if os.path.exists(self.testdir):
+            shutil.rmtree(self.testdir)
 
     def test_init_present_time_glacier(self):
 
-        gdir = init_hef(border=DOM_BORDER)
+        gdir = self.gdir
         flowline.init_present_time_glacier(gdir)
 
         fls = gdir.read_pickle('model_flowlines')
@@ -91,7 +97,7 @@ class TestInitFlowline(unittest.TestCase):
 
     def test_present_time_glacier_massbalance(self):
 
-        gdir = init_hef(border=DOM_BORDER)
+        gdir = self.gdir
         flowline.init_present_time_glacier(gdir)
 
         mb_mod = massbalance.PastMassBalance(gdir)
@@ -120,8 +126,7 @@ class TestInitFlowline(unittest.TestCase):
         self.assertTrue(np.abs(utils.md(tot_mb, refmb)) < 50)
 
         # Gradient
-        dfg = pd.read_csv(utils.get_demo_file('mbgrads_RGI40-11.00897.csv'),
-                          index_col='ALTITUDE').mean(axis=1)
+        dfg = gdir.get_ref_mb_profile().mean()
 
         # Take the altitudes below 3100 and fit a line
         dfg = dfg[dfg.index < 3100]
@@ -168,7 +173,7 @@ class TestOtherGlacier(unittest.TestCase):
         import geopandas as gpd
 
         hef_file = utils.get_demo_file('rgi_oetztal.shp')
-        rgidf = gpd.GeoDataFrame.from_file(hef_file)
+        rgidf = gpd.read_file(hef_file)
 
         # This is another glacier with divides
         entity = rgidf.loc[rgidf.RGIId == 'RGI50-11.00719_d01'].iloc[0]
@@ -182,8 +187,9 @@ class TestOtherGlacier(unittest.TestCase):
         centerlines.catchment_area(gdir)
         centerlines.catchment_width_geom(gdir)
         centerlines.catchment_width_correction(gdir)
-        climate.process_histalp_nonparallel([gdir])
-        climate.local_mustar(gdir, tstar=1930, bias=0, prcp_fac=2.5)
+        cfg.PARAMS['baseline_climate'] = ''
+        climate.process_custom_climate_data(gdir)
+        climate.local_mustar(gdir, tstar=1930, bias=0)
         climate.apparent_mb(gdir)
         inversion.prepare_for_inversion(gdir)
         v, ainv = inversion.mass_conservation_inversion(gdir)
@@ -231,30 +237,38 @@ class TestOtherGlacier(unittest.TestCase):
 
 
 class TestMassBalance(unittest.TestCase):
+
     def setUp(self):
-        pass
+        gdir = init_hef(border=DOM_BORDER)
+        self.testdir = os.path.join(get_test_dir(), type(self).__name__)
+        utils.mkdir(self.testdir, reset=True)
+        self.gdir = tasks.copy_to_basedir(gdir, base_dir=self.testdir,
+                                          setup='all')
 
     def tearDown(self):
-        pass
+        self.rm_dir()
+
+    def rm_dir(self):
+        if os.path.exists(self.testdir):
+            shutil.rmtree(self.testdir)
 
     def test_past_mb_model(self):
 
         F = SEC_IN_YEAR * cfg.RHO
 
-        gdir = init_hef(border=DOM_BORDER)
+        gdir = self.gdir
         flowline.init_present_time_glacier(gdir)
 
         df = pd.read_csv(gdir.get_filepath('local_mustar'))
         mu_star = df['mu_star'][0]
         bias = df['bias'][0]
-        prcp_fac = df['prcp_fac'][0]
 
         # Climate period
         yrp = [1851, 2000]
 
         # Flowlines height
         h, w = gdir.get_inversion_flowline_hw()
-        _, t, p = climate.mb_yearly_climate_on_height(gdir, h, prcp_fac,
+        _, t, p = climate.mb_yearly_climate_on_height(gdir, h,
                                                       year_range=yrp)
 
         mb_mod = massbalance.PastMassBalance(gdir, bias=0)
@@ -329,18 +343,20 @@ class TestMassBalance(unittest.TestCase):
                                    atol=1e-2)
         self.assertTrue(mbdf['ANNUAL_BALANCE'].mean() > mbdf['BIASED_MB'].mean())
 
+        # Repeat
+        mb_mod = massbalance.PastMassBalance(gdir, repeat=True,
+                                             ys=1901, ye=1950)
+        yrs = np.arange(100) + 1901
+        mb = mb_mod.get_specific_mb(h, w, year=yrs)
+        assert_allclose(mb[50], mb[-50])
+
     def test_constant_mb_model(self):
 
-        gdir = init_hef(border=DOM_BORDER)
+        gdir = self.gdir
         flowline.init_present_time_glacier(gdir)
 
         df = pd.read_csv(gdir.get_filepath('local_mustar'))
-        mu_star = df['mu_star'][0]
         bias = df['bias'][0]
-        prcp_fac = df['prcp_fac'][0]
-
-        h = np.array([])
-        w = np.array([])
 
         h, w = gdir.get_inversion_flowline_hw()
 
@@ -427,12 +443,11 @@ class TestMassBalance(unittest.TestCase):
         t, tm, p, ps = cmb_mod.get_climate([elah])
         mb = ps - cmb_mod.mbmod.mu_star * tm
         # not perfect because of time/months/zinterp issues
-        np.testing.assert_allclose(mb, 0, atol=0.08)
-
+        np.testing.assert_allclose(mb, 0, atol=0.12)
 
     def test_random_mb(self):
 
-        gdir = init_hef(border=DOM_BORDER)
+        gdir = self.gdir
         flowline.init_present_time_glacier(gdir)
 
         ref_mod = massbalance.ConstantMassBalance(gdir)
@@ -478,7 +493,7 @@ class TestMassBalance(unittest.TestCase):
                                                seed=10)
         mb_ts = []
         mb_ts2 = []
-        yrs = np.arange(1973, 2003, 1)
+        yrs = np.arange(1973, 2004, 1)
         for yr in yrs:
             mb_ts.append(np.average(mb_ref.get_annual_mb(h, yr) * SEC_IN_YEAR, weights=w))
             mb_ts2.append(np.average(mb_mod.get_annual_mb(h, yr) * SEC_IN_YEAR, weights=w))
@@ -497,9 +512,170 @@ class TestMassBalance(unittest.TestCase):
         ref_mb = ref_mb / 31
         self.assertTrue(utils.rmsd(ref_mb, my_mb) < 0.1)
 
+    def test_random_mb_unique(self):
+
+        gdir = self.gdir
+        flowline.init_present_time_glacier(gdir)
+
+        ref_mod = massbalance.ConstantMassBalance(gdir,
+                                                  halfsize=15)
+        mb_mod = massbalance.RandomMassBalance(gdir, seed=10,
+                                               unique_samples=True,
+                                               halfsize=15)
+        mb_mod2 = massbalance.RandomMassBalance(gdir, seed=20,
+                                                unique_samples=True,
+                                                halfsize=15)
+        mb_mod3 = massbalance.RandomMassBalance(gdir, seed=20,
+                                                unique_samples=True,
+                                                halfsize=15)
+
+        h, w = gdir.get_inversion_flowline_hw()
+
+        ref_mbh = ref_mod.get_annual_mb(h, None) * SEC_IN_YEAR
+
+        # the same year should be equal
+        r_mbh1 = mb_mod.get_annual_mb(h, 1) * SEC_IN_YEAR
+        r_mbh2 = mb_mod.get_annual_mb(h, 1) * SEC_IN_YEAR
+        np.testing.assert_allclose(r_mbh1, r_mbh2)
+
+        # test 31 years (2*halfsize +1)
+        ny = 31
+        yrs = np.arange(ny)
+        mbts = yrs * 0.
+        r_mbh = 0.
+        r_mbh2 = 0.
+        r_mbh3 = 0.
+        mb_mod3.temp_bias = -0.5
+        annual_previous = -999.
+        for i, yr in enumerate(yrs):
+            # specific mass balance
+            mbts[i] = mb_mod.get_specific_mb(h, w, yr)
+
+            # annual mass balance
+            annual = mb_mod.get_annual_mb(h, yr) * SEC_IN_YEAR
+
+            # annual mass balance must be different than the previous one
+            assert not np.all(np.allclose(annual, annual_previous))
+
+            # sum over all years should be equal to ref_mbh
+            r_mbh += annual
+            r_mbh2 += mb_mod2.get_annual_mb(h, yr) * SEC_IN_YEAR
+
+            # mass balance with temperature bias
+            r_mbh3 += mb_mod3.get_annual_mb(h, yr) * SEC_IN_YEAR
+
+            annual_previous = annual
+
+        r_mbh /= ny
+        r_mbh2 /= ny
+        r_mbh3 /= ny
+
+        # test sums
+        np.testing.assert_allclose(ref_mbh, r_mbh, atol=0.02)
+        np.testing.assert_allclose(r_mbh, r_mbh2, atol=0.02)
+
+        # test uniqueness
+        # size
+        self.assertTrue(len(list(mb_mod._state_yr.values())) ==
+                        np.unique(list(mb_mod._state_yr.values())).size)
+        # size2
+        self.assertTrue(len(list(mb_mod2._state_yr.values())) ==
+                        np.unique(list(mb_mod2._state_yr.values())).size)
+        # state years 1 vs 2
+        self.assertTrue(np.all(np.unique(list(mb_mod._state_yr.values())) ==
+                               np.unique(list(mb_mod2._state_yr.values()))))
+        # state years 1 vs reference model
+        self.assertTrue(np.all(np.unique(list(mb_mod._state_yr.values())) ==
+                               ref_mod.years))
+
+        # test ela vs specific mb
+        elats = mb_mod.get_ela(yrs[:200])
+        assert np.corrcoef(mbts[:200], elats)[0, 1] < -0.95
+
+        # test mass balance with temperature bias
+        self.assertTrue(np.mean(r_mbh) < np.mean(r_mbh3))
+
+    def test_uncertain_mb(self):
+
+        gdir = self.gdir
+
+        ref_mod = massbalance.ConstantMassBalance(gdir, bias=0)
+        mb_mod = massbalance.UncertainMassBalance(ref_mod)
+
+        yrs = np.arange(100)
+        h, w = gdir.get_inversion_flowline_hw()
+        ref_mb = ref_mod.get_specific_mb(h, w, year=yrs)
+        unc_mb = mb_mod.get_specific_mb(h, w, year=yrs)
+        check_mb = ref_mod.get_specific_mb(h, w, year=yrs)
+        unc2_mb = mb_mod.get_specific_mb(h, w, year=yrs)
+
+        assert_allclose(ref_mb, check_mb)
+        assert_allclose(unc_mb, unc2_mb)
+        assert np.std(unc_mb) > 50
+
+        mb_mod = massbalance.UncertainMassBalance(ref_mod,
+                                                  rdn_temp_bias_sigma=0.1,
+                                                  rdn_prcp_bias_sigma=0,
+                                                  rdn_bias_sigma=0)
+        ref_mb = ref_mod.get_specific_mb(h, w, year=yrs)
+        unc_mb = mb_mod.get_specific_mb(h, w, year=yrs)
+        check_mb = ref_mod.get_specific_mb(h, w, year=yrs)
+        assert_allclose(ref_mb, check_mb)
+        assert np.std(unc_mb) > 50
+
+        mb_mod = massbalance.UncertainMassBalance(ref_mod,
+                                                  rdn_temp_bias_sigma=0,
+                                                  rdn_prcp_bias_sigma=0.1,
+                                                  rdn_bias_sigma=0)
+        ref_mb = ref_mod.get_specific_mb(h, w, year=yrs)
+        unc_mb = mb_mod.get_specific_mb(h, w, year=yrs)
+        check_mb = ref_mod.get_specific_mb(h, w, year=yrs)
+        assert_allclose(ref_mb, check_mb)
+        assert np.std(unc_mb) > 50
+
+        mb_mod = massbalance.UncertainMassBalance(ref_mod,
+                                                  rdn_temp_bias_sigma=0,
+                                                  rdn_prcp_bias_sigma=0,
+                                                  rdn_bias_sigma=100)
+        ref_mb = ref_mod.get_specific_mb(h, w, year=yrs)
+        unc_mb = mb_mod.get_specific_mb(h, w, year=yrs)
+        check_mb = ref_mod.get_specific_mb(h, w, year=yrs)
+        assert_allclose(ref_mb, check_mb)
+        assert np.std(unc_mb) > 50
+
+        # Other MBs
+        ref_mod = massbalance.PastMassBalance(gdir)
+        mb_mod = massbalance.UncertainMassBalance(ref_mod)
+
+        yrs = np.arange(100) + 1901
+        ref_mb = ref_mod.get_specific_mb(h, w, year=yrs)
+        unc_mb = mb_mod.get_specific_mb(h, w, year=yrs)
+        check_mb = ref_mod.get_specific_mb(h, w, year=yrs)
+        unc2_mb = mb_mod.get_specific_mb(h, w, year=yrs)
+
+        assert_allclose(ref_mb, check_mb)
+        assert_allclose(unc_mb, unc2_mb)
+        assert np.std(unc_mb - ref_mb) > 50
+        assert np.corrcoef(ref_mb, unc_mb)[0, 1] > 0.5
+
+        # Other MBs
+        ref_mod = massbalance.RandomMassBalance(gdir)
+        mb_mod = massbalance.UncertainMassBalance(ref_mod)
+
+        yrs = np.arange(100) + 1901
+        ref_mb = ref_mod.get_specific_mb(h, w, year=yrs)
+        unc_mb = mb_mod.get_specific_mb(h, w, year=yrs)
+        check_mb = ref_mod.get_specific_mb(h, w, year=yrs)
+        unc2_mb = mb_mod.get_specific_mb(h, w, year=yrs)
+
+        assert_allclose(ref_mb, check_mb)
+        assert_allclose(unc_mb, unc2_mb)
+        assert np.std(unc_mb - ref_mb) > 50
+        assert np.corrcoef(ref_mb, unc_mb)[0, 1] > 0.5
+
     def test_mb_performance(self):
 
-        gdir = init_hef(border=DOM_BORDER)
+        gdir = self.gdir
         flowline.init_present_time_glacier(gdir)
 
         h, w = gdir.get_inversion_flowline_hw()
@@ -925,11 +1101,12 @@ class TestModelFlowlines(unittest.TestCase):
 class TestIO(unittest.TestCase):
 
     def setUp(self):
-        self.test_dir = os.path.join(get_test_dir(), 'tmp_io')
-        if not os.path.exists(self.test_dir):
-            os.makedirs(self.test_dir)
+        gdir = init_hef(border=DOM_BORDER)
+        self.test_dir = os.path.join(get_test_dir(), type(self).__name__)
+        utils.mkdir(self.test_dir, reset=True)
+        self.gdir = tasks.copy_to_basedir(gdir, base_dir=self.test_dir,
+                                          setup='all')
 
-        self.gdir = init_hef(border=DOM_BORDER)
         flowline.init_present_time_glacier(self.gdir)
         self.glen_a = 2.4e-24    # Modern style Glen parameter A
 
@@ -982,14 +1159,14 @@ class TestIO(unittest.TestCase):
                                         glen_a=self.glen_a)
         model.run_until(100)
 
-    @is_slow
+    @pytest.mark.slow
     def test_run(self):
         mb = LinearMassBalance(2600.)
 
         fls = dummy_constant_bed()
         model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
                                         glen_a=self.glen_a)
-        ds, ds_diag = model.run_until_and_store(500)
+        ds, ds_diag = model.run_until_and_store(500, store_monthly_step=True)
         ds = ds[0]
 
         fls = dummy_constant_bed()
@@ -1035,64 +1212,148 @@ class TestIO(unittest.TestCase):
         model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
                                         glen_a=self.glen_a)
         model.run_until_and_store(500, run_path=run_path,
-                                  diag_path=diag_path)
+                                  diag_path=diag_path,
+                                  store_monthly_step=True)
 
-        ds_ = xr.open_dataset(diag_path)
-        # the identical (i.e. attrs + names) doesn't work because of date
-        del ds_diag.attrs['creation_date']
-        del ds_.attrs['creation_date']
-        xr.testing.assert_identical(ds_diag, ds_)
+        with xr.open_dataset(diag_path) as ds_:
+            # the identical (i.e. attrs + names) doesn't work because of date
+            del ds_diag.attrs['creation_date']
+            del ds_.attrs['creation_date']
+            xr.testing.assert_identical(ds_diag, ds_)
 
-        fmodel = flowline.FileModel(run_path)
-        assert fmodel.last_yr == 500
+        with flowline.FileModel(run_path) as fmodel:
+            assert fmodel.last_yr == 500
+            fls = dummy_constant_bed()
+            model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
+                                            glen_a=self.glen_a)
+            for yr in years:
+                model.run_until(yr)
+                if yr in [100, 300, 500]:
+                    # this is sloooooow so we test a little bit only
+                    fmodel.run_until(yr)
+                    np.testing.assert_allclose(model.fls[0].section,
+                                               fmodel.fls[0].section)
+                    np.testing.assert_allclose(model.fls[0].widths_m,
+                                               fmodel.fls[0].widths_m)
+
+            np.testing.assert_allclose(fmodel.volume_m3_ts(), vol_ref)
+            np.testing.assert_allclose(fmodel.area_m2_ts(), a_ref)
+            np.testing.assert_allclose(fmodel.length_m_ts(), l_ref)
+
+            # Can we start a run from the middle?
+            fmodel.run_until(300)
+            model = flowline.FluxBasedModel(fmodel.fls, mb_model=mb, y0=300,
+                                            glen_a=self.glen_a)
+            model.run_until(500)
+            fmodel.run_until(500)
+            np.testing.assert_allclose(model.fls[0].section,
+                                       fmodel.fls[0].section)
+
+    @pytest.mark.slow
+    def test_run_annual_step(self):
+        mb = LinearMassBalance(2600.)
+
         fls = dummy_constant_bed()
         model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
                                         glen_a=self.glen_a)
+        ds, ds_diag = model.run_until_and_store(500)
+        ds = ds[0]
+
+        fls = dummy_constant_bed()
+        model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
+                                        glen_a=self.glen_a)
+
+        years = np.arange(0, 501)
+        vol_ref = []
+        a_ref = []
+        l_ref = []
+        vol_diag = []
+        a_diag = []
+        l_diag = []
+        ela_diag = []
         for yr in years:
             model.run_until(yr)
-            if yr in [100, 300, 500]:
-                # this is sloooooow so we test a little bit only
-                fmodel.run_until(yr)
-                np.testing.assert_allclose(model.fls[0].section,
-                                           fmodel.fls[0].section)
-                np.testing.assert_allclose(model.fls[0].widths_m,
-                                           fmodel.fls[0].widths_m)
+            vol_diag.append(model.volume_m3)
+            a_diag.append(model.area_m2)
+            l_diag.append(model.length_m)
+            ela_diag.append(model.mb_model.get_ela(year=yr))
+            vol_ref.append(model.volume_m3)
+            a_ref.append(model.area_m2)
+            l_ref.append(model.length_m)
+            if int(yr) == 500:
+                secfortest = model.fls[0].section
 
-        np.testing.assert_allclose(fmodel.volume_m3_ts(), vol_ref)
-        np.testing.assert_allclose(fmodel.area_m2_ts(), a_ref)
-        np.testing.assert_allclose(fmodel.length_m_ts(), l_ref)
+        np.testing.assert_allclose(ds.ts_section.isel(time=-1),
+                                   secfortest)
 
-        # Can we start a run from the middle?
-        fmodel.run_until(300)
-        model = flowline.FluxBasedModel(fmodel.fls, mb_model=mb, y0=300,
+        np.testing.assert_allclose(ds_diag.volume_m3, vol_diag)
+        np.testing.assert_allclose(ds_diag.area_m2, a_diag)
+        np.testing.assert_allclose(ds_diag.length_m, l_diag)
+        np.testing.assert_allclose(ds_diag.ela_m, ela_diag)
+
+        fls = dummy_constant_bed()
+        run_path = os.path.join(self.test_dir, 'ts_ideal.nc')
+        diag_path = os.path.join(self.test_dir, 'ts_diag.nc')
+        if os.path.exists(run_path):
+            os.remove(run_path)
+        if os.path.exists(diag_path):
+            os.remove(diag_path)
+        model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
                                         glen_a=self.glen_a)
-        model.run_until(500)
-        fmodel.run_until(500)
-        np.testing.assert_allclose(model.fls[0].section,
-                                   fmodel.fls[0].section)
+        model.run_until_and_store(500, run_path=run_path,
+                                  diag_path=diag_path)
+
+        with xr.open_dataset(diag_path) as ds_:
+            # the identical (i.e. attrs + names) doesn't work because of date
+            del ds_diag.attrs['creation_date']
+            del ds_.attrs['creation_date']
+            xr.testing.assert_identical(ds_diag, ds_)
+
+        with flowline.FileModel(run_path) as fmodel:
+            assert fmodel.last_yr == 500
+            fls = dummy_constant_bed()
+            model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
+                                            glen_a=self.glen_a)
+            for yr in years:
+                model.run_until(yr)
+                if yr in [100, 300, 500]:
+                    # this is sloooooow so we test a little bit only
+                    fmodel.run_until(yr)
+                    np.testing.assert_allclose(model.fls[0].section,
+                                               fmodel.fls[0].section)
+                    np.testing.assert_allclose(model.fls[0].widths_m,
+                                               fmodel.fls[0].widths_m)
+
+            np.testing.assert_allclose(fmodel.volume_m3_ts(), vol_ref)
+            np.testing.assert_allclose(fmodel.area_m2_ts(), a_ref)
+            np.testing.assert_allclose(fmodel.length_m_ts(), l_ref)
+
+            # Can we start a run from the middle?
+            fmodel.run_until(300)
+            model = flowline.FluxBasedModel(fmodel.fls, mb_model=mb, y0=300,
+                                            glen_a=self.glen_a)
+            model.run_until(500)
+            fmodel.run_until(500)
+            np.testing.assert_allclose(model.fls[0].section,
+                                       fmodel.fls[0].section)
 
     def test_gdir_copy(self):
 
         new_dir = os.path.join(get_test_dir(), 'tmp_testcopy')
         if os.path.exists(new_dir):
             shutil.rmtree(new_dir)
-        self.gdir.copy_to_basedir(new_dir, setup='all')
-        new_gdir = utils.GlacierDirectory(self.gdir.rgi_id, base_dir=new_dir)
+        new_gdir = tasks.copy_to_basedir(self.gdir, base_dir=new_dir,
+                                          setup='all')
         flowline.init_present_time_glacier(new_gdir)
         shutil.rmtree(new_dir)
 
-        self.gdir.copy_to_basedir(new_dir, setup='run')
-        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
-        entity = gpd.GeoDataFrame.from_file(hef_file).iloc[0]
-        new_gdir = utils.GlacierDirectory(entity, base_dir=new_dir)
+        new_gdir = tasks.copy_to_basedir(self.gdir, base_dir=new_dir,
+                                          setup='run')
         flowline.run_random_climate(new_gdir, nyears=10)
         shutil.rmtree(new_dir)
 
-        self.gdir.copy_to_basedir(new_dir, setup='inversion')
-        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
-        entity = gpd.GeoDataFrame.from_file(hef_file).iloc[0]
-        new_gdir = utils.GlacierDirectory(entity, base_dir=new_dir)
-
+        new_gdir = tasks.copy_to_basedir(self.gdir, base_dir=new_dir,
+                                          setup='inversion')
         inversion.prepare_for_inversion(new_gdir, invert_all_rectangular=True)
         inversion.volume_inversion(new_gdir)
         inversion.filter_inversion_output(new_gdir)
@@ -1172,7 +1433,7 @@ class TestBackwardsIdealized(unittest.TestCase):
     def tearDown(self):
         pass
 
-    @is_slow
+    @pytest.mark.slow
     def test_iterative_back(self):
 
         # This test could be deleted
@@ -1239,7 +1500,7 @@ class TestBackwardsIdealized(unittest.TestCase):
                                    self.glacier[-1].area_m2,
                                    rtol=rtol)
 
-    @is_slow
+    @pytest.mark.slow
     def test_fails(self):
 
         # This test could be deleted
@@ -1272,7 +1533,7 @@ class TestIdealisedInversion(unittest.TestCase):
         cfg.PATHS['climate_file'] = get_demo_file('histalp_merged_hef.nc')
 
         hef_file = get_demo_file('Hintereisferner_RGI5.shp')
-        entity = gpd.GeoDataFrame.from_file(hef_file).iloc[0]
+        entity = gpd.read_file(hef_file).iloc[0]
 
         self.gdir = GlacierDirectory(entity, base_dir=self.testdir, reset=True)
         define_glacier_region(self.gdir, entity=entity)
@@ -1377,7 +1638,97 @@ class TestIdealisedInversion(unittest.TestCase):
             plt.plot(bed_shape_gl[:-3])
             plt.show()
 
-    @is_slow
+    def test_inversion_parabolic_sf_adhikari(self):
+        old_model_sf = cfg.PARAMS['use_shape_factor_for_fluxbasedmodel']
+        old_inversion_sf = cfg.PARAMS['use_shape_factor_for_inversion']
+        cfg.PARAMS['use_shape_factor_for_fluxbasedmodel'] = 'Adhikari'
+        cfg.PARAMS['use_shape_factor_for_inversion'] = 'Adhikari'
+
+        fls = dummy_parabolic_bed(map_dx=self.gdir.grid.dx)
+        for fl in fls:
+            fl.is_rectangular = np.zeros(fl.nx).astype(np.bool)
+
+        mb = LinearMassBalance(2500.)
+
+        model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
+                                        time_stepping='conservative')
+        model.run_until_equilibrium()
+
+        fls = []
+        for fl in model.fls:
+            pg = np.where(fl.thick > 0)
+            line = shpg.LineString([fl.line.coords[int(p)] for p in pg[0]])
+            flo = centerlines.Centerline(line, dx=fl.dx,
+                                         surface_h=fl.surface_h[pg])
+            flo.widths = fl.widths[pg]
+            flo.is_rectangular = np.zeros(flo.nx).astype(np.bool)
+            fls.append(flo)
+        self.gdir.write_pickle(copy.deepcopy(fls), 'inversion_flowlines')
+
+        climate.apparent_mb_from_linear_mb(self.gdir)
+        inversion.prepare_for_inversion(self.gdir)
+        v, _ = inversion.mass_conservation_inversion(self.gdir)
+        assert_allclose(v, model.volume_m3, rtol=0.02)
+
+        inv = self.gdir.read_pickle('inversion_output')[-1]
+        bed_shape_gl = 4 * inv['thick'] / (flo.widths * self.gdir.grid.dx) ** 2
+        bed_shape_ref = 4 * fl.thick[pg] / (flo.widths * self.gdir.grid.dx) ** 2
+
+        # assert utils.rmsd(fl.bed_shape[pg], bed_shape_gl) < 0.001
+        if do_plot:  # pragma: no cover
+            plt.plot(bed_shape_ref[:-3])
+            plt.plot(bed_shape_gl[:-3])
+            plt.show()
+
+        cfg.PARAMS['use_shape_factor_for_fluxbasedmodel'] = old_model_sf
+        cfg.PARAMS['use_shape_factor_for_inversion'] = old_inversion_sf
+
+    def test_inversion_parabolic_sf_huss(self):
+        old_model_sf = cfg.PARAMS['use_shape_factor_for_fluxbasedmodel']
+        old_inversion_sf = cfg.PARAMS['use_shape_factor_for_inversion']
+        cfg.PARAMS['use_shape_factor_for_fluxbasedmodel'] = 'Huss'
+        cfg.PARAMS['use_shape_factor_for_inversion'] = 'Huss'
+
+        fls = dummy_parabolic_bed(map_dx=self.gdir.grid.dx)
+        for fl in fls:
+            fl.is_rectangular = np.zeros(fl.nx).astype(np.bool)
+
+        mb = LinearMassBalance(2500.)
+
+        model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
+                                        time_stepping='conservative')
+        model.run_until_equilibrium()
+
+        fls = []
+        for fl in model.fls:
+            pg = np.where(fl.thick > 0)
+            line = shpg.LineString([fl.line.coords[int(p)] for p in pg[0]])
+            flo = centerlines.Centerline(line, dx=fl.dx,
+                                         surface_h=fl.surface_h[pg])
+            flo.widths = fl.widths[pg]
+            flo.is_rectangular = np.zeros(flo.nx).astype(np.bool)
+            fls.append(flo)
+        self.gdir.write_pickle(copy.deepcopy(fls), 'inversion_flowlines')
+
+        climate.apparent_mb_from_linear_mb(self.gdir)
+        inversion.prepare_for_inversion(self.gdir)
+        v, _ = inversion.mass_conservation_inversion(self.gdir)
+        assert_allclose(v, model.volume_m3, rtol=0.01)
+
+        inv = self.gdir.read_pickle('inversion_output')[-1]
+        bed_shape_gl = 4 * inv['thick'] / (flo.widths * self.gdir.grid.dx) ** 2
+        bed_shape_ref = 4 * fl.thick[pg] / (flo.widths * self.gdir.grid.dx) ** 2
+
+        # assert utils.rmsd(fl.bed_shape[pg], bed_shape_gl) < 0.001
+        if do_plot:  # pragma: no cover
+            plt.plot(bed_shape_ref[:-3])
+            plt.plot(bed_shape_gl[:-3])
+            plt.show()
+
+        cfg.PARAMS['use_shape_factor_for_fluxbasedmodel'] = old_model_sf
+        cfg.PARAMS['use_shape_factor_for_inversion'] = old_inversion_sf
+
+    @pytest.mark.slow
     def test_inversion_mixed(self):
 
         fls = dummy_mixed_bed(deflambdas=0, map_dx=self.gdir.grid.dx,
@@ -1409,7 +1760,7 @@ class TestIdealisedInversion(unittest.TestCase):
         if do_plot:  # pragma: no cover
             self.simple_plot(model)
 
-    @is_slow
+    @pytest.mark.slow
     def test_inversion_cliff(self):
 
         fls = dummy_constant_bed_cliff(map_dx=self.gdir.grid.dx,
@@ -1439,6 +1790,84 @@ class TestIdealisedInversion(unittest.TestCase):
         if do_plot:  # pragma: no cover
             self.simple_plot(model)
 
+    @pytest.mark.slow
+    def test_inversion_cliff_sf_adhikari(self):
+        old_model_sf = cfg.PARAMS['use_shape_factor_for_fluxbasedmodel']
+        old_inversion_sf = cfg.PARAMS['use_shape_factor_for_inversion']
+        cfg.PARAMS['use_shape_factor_for_fluxbasedmodel'] = 'Adhikari'
+        cfg.PARAMS['use_shape_factor_for_inversion'] = 'Adhikari'
+
+        fls = dummy_constant_bed_cliff(map_dx=self.gdir.grid.dx,
+                                       cliff_height=100)
+        for fl in fls:
+            fl.is_rectangular = np.ones(fl.nx).astype(np.bool)
+        mb = LinearMassBalance(2600.)
+
+        model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
+                                        time_stepping='conservative')
+        model.run_until_equilibrium()
+        fls = []
+        for fl in model.fls:
+            pg = np.where(fl.thick > 0)
+            line = shpg.LineString([fl.line.coords[int(p)] for p in pg[0]])
+            sh = fl.surface_h[pg]
+            flo = centerlines.Centerline(line, dx=fl.dx,
+                                         surface_h=sh)
+            flo.widths = fl.widths[pg]
+            flo.is_rectangular = np.ones(flo.nx).astype(np.bool)
+            fls.append(flo)
+        self.gdir.write_pickle(copy.deepcopy(fls), 'inversion_flowlines')
+
+        climate.apparent_mb_from_linear_mb(self.gdir)
+        inversion.prepare_for_inversion(self.gdir)
+        v, _ = inversion.mass_conservation_inversion(self.gdir)
+
+        assert_allclose(v, model.volume_m3, rtol=0.05)
+        if do_plot:  # pragma: no cover
+            self.simple_plot(model)
+
+        cfg.PARAMS['use_shape_factor_for_fluxbasedmodel'] = old_model_sf
+        cfg.PARAMS['use_shape_factor_for_inversion'] = old_inversion_sf
+
+    @pytest.mark.slow
+    def test_inversion_cliff_sf_huss(self):
+        old_model_sf = cfg.PARAMS['use_shape_factor_for_fluxbasedmodel']
+        old_inversion_sf = cfg.PARAMS['use_shape_factor_for_inversion']
+        cfg.PARAMS['use_shape_factor_for_fluxbasedmodel'] = 'Huss'
+        cfg.PARAMS['use_shape_factor_for_inversion'] = 'Huss'
+
+        fls = dummy_constant_bed_cliff(map_dx=self.gdir.grid.dx,
+                                       cliff_height=100)
+        for fl in fls:
+            fl.is_rectangular = np.ones(fl.nx).astype(np.bool)
+        mb = LinearMassBalance(2600.)
+
+        model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
+                                        time_stepping='conservative')
+        model.run_until_equilibrium()
+        fls = []
+        for fl in model.fls:
+            pg = np.where(fl.thick > 0)
+            line = shpg.LineString([fl.line.coords[int(p)] for p in pg[0]])
+            sh = fl.surface_h[pg]
+            flo = centerlines.Centerline(line, dx=fl.dx,
+                                         surface_h=sh)
+            flo.widths = fl.widths[pg]
+            flo.is_rectangular = np.ones(flo.nx).astype(np.bool)
+            fls.append(flo)
+        self.gdir.write_pickle(copy.deepcopy(fls), 'inversion_flowlines')
+
+        climate.apparent_mb_from_linear_mb(self.gdir)
+        inversion.prepare_for_inversion(self.gdir)
+        v, _ = inversion.mass_conservation_inversion(self.gdir)
+
+        assert_allclose(v, model.volume_m3, rtol=0.05)
+        if do_plot:  # pragma: no cover
+            self.simple_plot(model)
+
+        cfg.PARAMS['use_shape_factor_for_fluxbasedmodel'] = old_model_sf
+        cfg.PARAMS['use_shape_factor_for_inversion'] = old_inversion_sf
+
     def test_inversion_noisy(self):
 
         fls = dummy_noisy_bed(map_dx=self.gdir.grid.dx)
@@ -1466,6 +1895,81 @@ class TestIdealisedInversion(unittest.TestCase):
         assert_allclose(v, model.volume_m3, rtol=0.05)
         if do_plot:  # pragma: no cover
             self.simple_plot(model)
+
+    def test_inversion_noisy_sf_adhikari(self):
+        old_model_sf = cfg.PARAMS['use_shape_factor_for_fluxbasedmodel']
+        old_inversion_sf = cfg.PARAMS['use_shape_factor_for_inversion']
+        cfg.PARAMS['use_shape_factor_for_fluxbasedmodel'] = 'Adhikari'
+        cfg.PARAMS['use_shape_factor_for_inversion'] = 'Adhikari'
+
+        fls = dummy_noisy_bed(map_dx=self.gdir.grid.dx)
+        for fl in fls:
+            fl.is_rectangular = np.ones(fl.nx).astype(np.bool)
+        mb = LinearMassBalance(2600.)
+
+        model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
+                                        time_stepping='conservative')
+        model.run_until_equilibrium()
+        fls = []
+        for fl in model.fls:
+            pg = np.where(fl.thick > 0)
+            line = shpg.LineString([fl.line.coords[int(p)] for p in pg[0]])
+            sh = fl.surface_h[pg]
+            flo = centerlines.Centerline(line, dx=fl.dx,
+                                         surface_h=sh)
+            flo.widths = fl.widths[pg]
+            flo.is_rectangular = np.ones(flo.nx).astype(np.bool)
+            fls.append(flo)
+        self.gdir.write_pickle(copy.deepcopy(fls), 'inversion_flowlines')
+
+        climate.apparent_mb_from_linear_mb(self.gdir)
+        inversion.prepare_for_inversion(self.gdir)
+        v, _ = inversion.mass_conservation_inversion(self.gdir)
+
+        assert_allclose(v, model.volume_m3, rtol=0.05)
+        if do_plot:  # pragma: no cover
+            self.simple_plot(model)
+
+        cfg.PARAMS['use_shape_factor_for_fluxbasedmodel'] = old_model_sf
+        cfg.PARAMS['use_shape_factor_for_inversion'] = old_inversion_sf
+
+    @pytest.mark.slow
+    def test_inversion_noisy_sf_huss(self):
+        old_model_sf = cfg.PARAMS['use_shape_factor_for_fluxbasedmodel']
+        old_inversion_sf = cfg.PARAMS['use_shape_factor_for_inversion']
+        cfg.PARAMS['use_shape_factor_for_fluxbasedmodel'] = 'Huss'
+        cfg.PARAMS['use_shape_factor_for_inversion'] = 'Huss'
+
+        fls = dummy_noisy_bed(map_dx=self.gdir.grid.dx)
+        for fl in fls:
+            fl.is_rectangular = np.ones(fl.nx).astype(np.bool)
+        mb = LinearMassBalance(2600.)
+
+        model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
+                                        time_stepping='conservative')
+        model.run_until_equilibrium()
+        fls = []
+        for fl in model.fls:
+            pg = np.where(fl.thick > 0)
+            line = shpg.LineString([fl.line.coords[int(p)] for p in pg[0]])
+            sh = fl.surface_h[pg]
+            flo = centerlines.Centerline(line, dx=fl.dx,
+                                         surface_h=sh)
+            flo.widths = fl.widths[pg]
+            flo.is_rectangular = np.ones(flo.nx).astype(np.bool)
+            fls.append(flo)
+        self.gdir.write_pickle(copy.deepcopy(fls), 'inversion_flowlines')
+
+        climate.apparent_mb_from_linear_mb(self.gdir)
+        inversion.prepare_for_inversion(self.gdir)
+        v, _ = inversion.mass_conservation_inversion(self.gdir)
+
+        assert_allclose(v, model.volume_m3, rtol=0.05)
+        if do_plot:  # pragma: no cover
+            self.simple_plot(model)
+
+        cfg.PARAMS['use_shape_factor_for_fluxbasedmodel'] = old_model_sf
+        cfg.PARAMS['use_shape_factor_for_inversion'] = old_inversion_sf
 
     def test_inversion_tributary(self):
 
@@ -1498,6 +2002,89 @@ class TestIdealisedInversion(unittest.TestCase):
         assert_allclose(v, model.volume_m3, rtol=0.02)
         if do_plot:  # pragma: no cover
             self.double_plot(model)
+
+    def test_inversion_tributary_sf_adhikari(self):
+        old_model_sf = cfg.PARAMS['use_shape_factor_for_fluxbasedmodel']
+        old_inversion_sf = cfg.PARAMS['use_shape_factor_for_inversion']
+        cfg.PARAMS['use_shape_factor_for_fluxbasedmodel'] = 'Adhikari'
+        cfg.PARAMS['use_shape_factor_for_inversion'] = 'Adhikari'
+
+        fls = dummy_width_bed_tributary(map_dx=self.gdir.grid.dx)
+        for fl in fls:
+            fl.is_rectangular = np.ones(fl.nx).astype(np.bool)
+        mb = LinearMassBalance(2600.)
+
+        model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
+                                        time_stepping='conservative')
+        model.run_until_equilibrium()
+
+        fls = []
+        for fl in model.fls:
+            pg = np.where(fl.thick > 0)
+            line = shpg.LineString([fl.line.coords[int(p)] for p in pg[0]])
+            sh = fl.surface_h[pg]
+            flo = centerlines.Centerline(line, dx=fl.dx,
+                                         surface_h=sh)
+            flo.widths = fl.widths[pg]
+            flo.is_rectangular = np.ones(flo.nx).astype(np.bool)
+            fls.append(flo)
+
+        fls[0].set_flows_to(fls[1])
+
+        self.gdir.write_pickle(copy.deepcopy(fls), 'inversion_flowlines')
+
+        climate.apparent_mb_from_linear_mb(self.gdir)
+        inversion.prepare_for_inversion(self.gdir)
+        v, _ = inversion.mass_conservation_inversion(self.gdir)
+
+        assert_allclose(v, model.volume_m3, rtol=0.02)
+        if do_plot:  # pragma: no cover
+            self.double_plot(model)
+
+        cfg.PARAMS['use_shape_factor_for_fluxbasedmodel'] = old_model_sf
+        cfg.PARAMS['use_shape_factor_for_inversion'] = old_inversion_sf
+
+    @pytest.mark.slow
+    def test_inversion_tributary_sf_huss(self):
+        old_model_sf = cfg.PARAMS['use_shape_factor_for_fluxbasedmodel']
+        old_inversion_sf = cfg.PARAMS['use_shape_factor_for_inversion']
+        cfg.PARAMS['use_shape_factor_for_fluxbasedmodel'] = 'Huss'
+        cfg.PARAMS['use_shape_factor_for_inversion'] = 'Huss'
+
+        fls = dummy_width_bed_tributary(map_dx=self.gdir.grid.dx)
+        for fl in fls:
+            fl.is_rectangular = np.ones(fl.nx).astype(np.bool)
+        mb = LinearMassBalance(2600.)
+
+        model = flowline.FluxBasedModel(fls, mb_model=mb, y0=0.,
+                                        time_stepping='conservative')
+        model.run_until_equilibrium()
+
+        fls = []
+        for fl in model.fls:
+            pg = np.where(fl.thick > 0)
+            line = shpg.LineString([fl.line.coords[int(p)] for p in pg[0]])
+            sh = fl.surface_h[pg]
+            flo = centerlines.Centerline(line, dx=fl.dx,
+                                         surface_h=sh)
+            flo.widths = fl.widths[pg]
+            flo.is_rectangular = np.ones(flo.nx).astype(np.bool)
+            fls.append(flo)
+
+        fls[0].set_flows_to(fls[1])
+
+        self.gdir.write_pickle(copy.deepcopy(fls), 'inversion_flowlines')
+
+        climate.apparent_mb_from_linear_mb(self.gdir)
+        inversion.prepare_for_inversion(self.gdir)
+        v, _ = inversion.mass_conservation_inversion(self.gdir)
+
+        assert_allclose(v, model.volume_m3, rtol=0.02)
+        if do_plot:  # pragma: no cover
+            self.double_plot(model)
+
+        cfg.PARAMS['use_shape_factor_for_fluxbasedmodel'] = old_model_sf
+        cfg.PARAMS['use_shape_factor_for_inversion'] = old_inversion_sf
 
     def test_inversion_non_equilibrium(self):
 
@@ -1588,15 +2175,24 @@ class TestIdealisedInversion(unittest.TestCase):
 class TestHEF(unittest.TestCase):
 
     def setUp(self):
-        self.gdir = init_hef(border=DOM_BORDER, invert_with_rectangular=False)
+        gdir = init_hef(border=DOM_BORDER, invert_with_rectangular=False)
+        self.testdir = os.path.join(get_test_dir(), type(self).__name__)
+        utils.mkdir(self.testdir, reset=True)
+        self.gdir = tasks.copy_to_basedir(gdir, base_dir=self.testdir,
+                                          setup='all')
+
         d = self.gdir.read_pickle('inversion_params')
         self.fs = d['fs']
         self.glen_a = d['glen_a']
 
     def tearDown(self):
-        pass
+        self.rm_dir()
 
-    @is_slow
+    def rm_dir(self):
+        if os.path.exists(self.testdir):
+            shutil.rmtree(self.testdir)
+
+    @pytest.mark.slow
     def test_equilibrium(self):
 
         flowline.init_present_time_glacier(self.gdir)
@@ -1623,11 +2219,11 @@ class TestHEF(unittest.TestCase):
         after_area = model.area_km2
         after_len = model.fls[-1].length_m
 
-        np.testing.assert_allclose(ref_vol, after_vol, rtol=0.08)
+        np.testing.assert_allclose(ref_vol, after_vol, rtol=0.1)
         np.testing.assert_allclose(ref_area, after_area, rtol=0.03)
         np.testing.assert_allclose(ref_len, after_len, atol=500.01)
 
-    @is_slow
+    @pytest.mark.slow
     def test_commitment(self):
 
         flowline.init_present_time_glacier(self.gdir)
@@ -1687,7 +2283,7 @@ class TestHEF(unittest.TestCase):
             plt.legend(loc='best')
             plt.show()
 
-    @is_slow
+    @pytest.mark.slow
     def test_random(self):
 
         flowline.init_present_time_glacier(self.gdir)
@@ -1719,14 +2315,17 @@ class TestHEF(unittest.TestCase):
                     plt.tight_layout()
                     plt.show()
 
-
-    @is_slow
+    @pytest.mark.slow
     def test_random_sh(self):
 
         flowline.init_present_time_glacier(self.gdir)
 
         self.gdir.hemisphere = 'sh'
+        cfg.PARAMS['baseline_climate'] = 'CRU'
+        cfg.PARAMS['run_mb_calibration'] = True
         climate.process_cru_data(self.gdir)
+        climate.compute_ref_t_stars([self.gdir])
+        climate.local_mustar(self.gdir)
 
         flowline.run_random_climate(self.gdir, nyears=20, seed=4,
                                     bias=0, output_filesuffix='_rdn')
@@ -1758,7 +2357,7 @@ class TestHEF(unittest.TestCase):
 
         self.gdir.hemisphere = 'nh'
 
-    @is_slow
+    @pytest.mark.slow
     def test_cesm(self):
 
         gdir = self.gdir
@@ -1800,14 +2399,11 @@ class TestHEF(unittest.TestCase):
                 np.testing.assert_allclose(shist.prcp.mean(),
                                            scesm.prcp.mean(),
                                            rtol=1e-3)
-                np.testing.assert_allclose(shist.grad.mean(),
-                                           scesm.grad.mean())
                 # And also the anual cycle
                 scru = shist.groupby('time.month').mean()
                 scesm = scesm.groupby(scesm.month).mean()
                 np.testing.assert_allclose(scru.temp, scesm.temp, rtol=5e-3)
                 np.testing.assert_allclose(scru.prcp, scesm.prcp, rtol=1e-3)
-                np.testing.assert_allclose(scru.grad, scesm.grad)
 
         # Mass balance models
         mb_cru = massbalance.PastMassBalance(self.gdir)
@@ -1873,9 +2469,9 @@ class TestHEF(unittest.TestCase):
                                        filesuffix='_afterspinup')
         assert (ds1.volume.isel(rgi_id=0, time=-1) <
                 0.7*ds3.volume.isel(rgi_id=0, time=-1))
+        ds3.close()
 
-
-    @is_slow
+    @pytest.mark.slow
     def test_elevation_feedback(self):
 
         flowline.init_present_time_glacier(self.gdir)
@@ -1886,7 +2482,8 @@ class TestHEF(unittest.TestCase):
         for feedback in feedbacks:
             tasks.append((flowline.run_random_climate,
                           dict(nyears=200, seed=5, mb_elev_feedback=feedback,
-                               output_filesuffix=feedback)))
+                               output_filesuffix=feedback,
+                               store_monthly_step=True)))
         workflow.execute_parallel_tasks(self.gdir, tasks)
 
         out = []

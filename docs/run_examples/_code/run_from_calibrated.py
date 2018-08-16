@@ -1,15 +1,10 @@
 # Python imports
 from os import path
-import shutil
-import zipfile
 import oggm
 
 # Module logger
 import logging
 log = logging.getLogger(__name__)
-
-# Libs
-import salem
 
 # Locals
 import oggm.cfg as cfg
@@ -39,23 +34,19 @@ cfg.PARAMS['border'] = 100
 # Set to True for operational runs
 cfg.PARAMS['continue_on_error'] = False
 
-# We use intersects
-# Here we use the global file but there are regional files too (faster)
-cfg.set_intersects_db(utils.get_rgi_intersects_region_file('00', version='5'))
-
 # Pre-download other files which will be needed later
 utils.get_cru_cl_file()
 utils.get_cru_file(var='tmp')
 utils.get_cru_file(var='pre')
 
-# Download the RGI file for the run
-# We us a set of four glaciers here but this could be an entire RGI region,
-# or any glacier list you'd like to model
-dl = 'https://cluster.klima.uni-bremen.de/~fmaussion/misc/RGI_example_glaciers.zip'
-with zipfile.ZipFile(utils.file_downloader(dl)) as zf:
-    zf.extractall(WORKING_DIR)
-rgidf = salem.read_shapefile(path.join(WORKING_DIR, 'RGI_example_glaciers',
-                                       'RGI_example_glaciers.shp'))
+# Get the RGI glaciers for the run. We use a set of three glaciers here but
+# this could be an entire RGI region, or any glacier list you'd like to model
+rgi_list = ['RGI60-01.10299', 'RGI60-11.00897', 'RGI60-18.02342']
+rgidf = utils.get_rgi_glacier_entities(rgi_list)
+
+# We use intersects
+db = utils.get_rgi_intersects_region_file(version='61', rgi_ids=rgi_list)
+cfg.set_intersects_db(db)
 
 # Sort for more efficient parallel computing
 rgidf = rgidf.sort_values('Area', ascending=False)
@@ -66,7 +57,7 @@ log.info('Number of glaciers: {}'.format(len(rgidf)))
 # Go - initialize working directories
 gdirs = workflow.init_glacier_regions(rgidf)
 
-# Preprocessing tasks
+# Preprocessing and climate tasks
 task_list = [
     tasks.glacier_masks,
     tasks.compute_centerlines,
@@ -77,14 +68,12 @@ task_list = [
     tasks.catchment_intersections,
     tasks.catchment_width_geom,
     tasks.catchment_width_correction,
+    tasks.process_cru_data,
+    tasks.local_mustar,
+    tasks.apparent_mb,
 ]
 for task in task_list:
     execute_entity_task(task, gdirs)
-
-# Climate tasks -- only data IO and tstar interpolation!
-execute_entity_task(tasks.process_cru_data, gdirs)
-tasks.distribute_t_stars(gdirs)
-execute_entity_task(tasks.apparent_mb, gdirs)
 
 # Inversion tasks
 execute_entity_task(tasks.prepare_for_inversion, gdirs)
