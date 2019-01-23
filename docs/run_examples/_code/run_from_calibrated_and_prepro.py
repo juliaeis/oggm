@@ -1,25 +1,23 @@
 # Python imports
-from os import path
-import oggm
-
-# Module logger
+import time
 import logging
-log = logging.getLogger(__name__)
 
 # Locals
 import oggm.cfg as cfg
 from oggm import tasks, utils, workflow
 from oggm.workflow import execute_entity_task
 
+# Module logger
+log = logging.getLogger(__name__)
+
 # For timing the run
-import time
 start = time.time()
 
 # Initialize OGGM and set up the run parameters
 cfg.initialize()
 
 # Local working directory (where OGGM will write its output)
-WORKING_DIR = path.join(path.expanduser('~'), 'tmp', 'OGGM_precalibrated_run')
+WORKING_DIR = utils.gettempdir('OGGM_precalibrated_run')
 cfg.PATHS['working_dir'] = WORKING_DIR
 
 # Use multiprocessing?

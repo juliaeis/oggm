@@ -18,7 +18,7 @@ available data for calibration and validation.
 Installation, documentation
 ---------------------------
 
-The documentation is hosted on ReadTheDocs: http://oggm.readthedocs.io
+The documentation is hosted on ReadTheDocs: http://docs.oggm.org
 
 
 Get in touch
@@ -30,7 +30,7 @@ Get in touch
 - Follow us on `Twitter`_.
 - Or you can always send us an `e-mail`_ the good old way.
 
-.. _e-mail: info@oggm.org
+.. _e-mail: https://mailman.zfn.uni-bremen.de/cgi-bin/mailman/listinfo/oggm-users
 .. _on GitHub: https://github.com/OGGM/oggm
 .. _issue tracker: https://github.com/OGGM/oggm/issues
 .. _pull request: https://github.com/OGGM/oggm/pulls
@@ -67,15 +67,15 @@ About
         :target: https://travis-ci.org/OGGM/oggm
         :alt: Linux build status
 
-    .. image:: https://ci.appveyor.com/api/projects/status/alealh9rxmqgd3nm/branch/master?svg=true
-        :target: https://ci.appveyor.com/project/fmaussion/oggm
-        :alt: Windows-conda build status
+    .. image:: https://img.shields.io/badge/Cross-validation-blue.svg
+        :target: https://cluster.klima.uni-bremen.de/~github/crossval/
+        :alt: Mass-balance cross validation
 
     .. image:: https://readthedocs.org/projects/oggm/badge/?version=latest
-        :target: http://oggm.readthedocs.org/en/latest/?badge=latest
+        :target: http://docs.oggm.org/en/latest/
         :alt: Documentation status
 
-    .. image:: http://img.shields.io/badge/benchmarked%20by-asv-green.svg?style=flat
+    .. image:: https://img.shields.io/badge/benchmarked%20by-asv-green.svg?style=flat
         :target: https://cluster.klima.uni-bremen.de/~github/asv/
         :alt: Benchmark status
 
@@ -86,6 +86,6 @@ About
 
 :Authors:
 
-    See `whats-new`_ for a list of all contributors.
+    See the `version history`_ for a list of all contributors.
 
-    .. _whats-new: http://oggm.readthedocs.org/en/latest/whats-new.html
+    .. _version history: http://docs.oggm.org/en/latest/whats-new.html

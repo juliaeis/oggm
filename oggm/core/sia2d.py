@@ -4,7 +4,7 @@ import xarray as xr
 import os
 
 from oggm import cfg, utils
-from oggm.cfg import RHO, G, N, SEC_IN_YEAR, SEC_IN_DAY
+from oggm.cfg import G, SEC_IN_YEAR, SEC_IN_DAY
 
 
 def filter_ice_border(ice_thick):
@@ -49,25 +49,12 @@ class Model2D(object):
         """
 
         # Mass balance
-        self.mb_model = mb_model
         self.mb_elev_feedback = mb_elev_feedback
-        _mb_call = None
-        if mb_model:
-            if mb_elev_feedback == 'always':
-                _mb_call = mb_model.get_monthly_mb
-            elif mb_elev_feedback == 'monthly':
-                _mb_call = mb_model.get_monthly_mb
-            elif mb_elev_feedback == 'annual':
-                _mb_call = mb_model.get_annual_mb
-            else:
-                raise ValueError('mb_elev_feedback not understood')
-        self._mb_call = _mb_call
-        self._mb_current_date = None
-        self._mb_current_out = None
+        self.mb_model = mb_model
 
         # Defaults
         if glen_a is None:
-            glen_a = cfg.A
+            glen_a = cfg.PARAMS['glen_a']
         self.glen_a = glen_a
 
         if dy is None:
@@ -88,6 +75,27 @@ class Model2D(object):
         self.ice_thick = None
         self.reset_ice_thick(init_ice_thick)
         self.ny, self.nx = bed_topo.shape
+
+    @property
+    def mb_model(self):
+        return self._mb_model
+
+    @mb_model.setter
+    def mb_model(self, value):
+        # We need a setter because the MB func is stored as an attr too
+        _mb_call = None
+        if value:
+            if self.mb_elev_feedback in ['always', 'monthly']:
+                _mb_call = value.get_monthly_mb
+            elif self.mb_elev_feedback in ['annual', 'never']:
+                _mb_call = value.get_annual_mb
+            else:
+                raise ValueError('mb_elev_feedback not understood')
+        self._mb_model = value
+        self._mb_call = _mb_call
+        self._mb_current_date = None
+        self._mb_current_out = dict()
+        self._mb_current_heights = dict()
 
     def reset_y0(self, y0):
         """Reset the initial model time"""
@@ -270,7 +278,10 @@ class Upstream2D(Model2D):
                                          ice_thick_filter=ice_thick_filter)
 
         # We introduce Gamma to shorten the equations
-        self.gamma = 2. * self.glen_a * (RHO * G) ** N / (N + 2)
+        self.rho = cfg.PARAMS['ice_density']
+        self.glen_n = cfg.PARAMS['glen_n']
+        self.gamma = (2. * self.glen_a * (self.rho * G) ** self.glen_n
+                      / (self.glen_n + 2))
 
         # forward time stepping stability criteria
         # default is just beyond R. Hindmarsh's idea of 1/2(n+1)
@@ -285,7 +296,7 @@ class Upstream2D(Model2D):
         self.k = np.arange(0, self.ny)
         self.kp = np.hstack([np.arange(1, self.ny), self.ny - 1])
         self.km = np.hstack([0, np.arange(0, self.ny - 1)])
-        self.l = np.arange(0, self.nx)
+        self.l = np.arange(0, self.nx)  # flake8: noqa E741
         self.lp = np.hstack([np.arange(1, self.nx), self.nx - 1])
         self.lm = np.hstack([0, np.arange(0, self.nx - 1)])
         self.H_upstream_up = np.zeros((self.ny, self.nx))
@@ -309,6 +320,7 @@ class Upstream2D(Model2D):
 
         H = self.ice_thick
         S = self.surface_h
+        N = self.glen_n
 
         # Optim
         S_ixklp = S[self._ixklp]

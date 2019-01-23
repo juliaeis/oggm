@@ -1,6 +1,6 @@
 # Python imports
-from os import path
 import json
+import os
 
 # Libs
 import numpy as np
@@ -9,6 +9,8 @@ import numpy as np
 import oggm
 from oggm import cfg, utils, tasks, workflow
 from oggm.workflow import execute_entity_task
+from oggm.core.massbalance import (ConstantMassBalance, PastMassBalance,
+                                   MultipleFlowlineMassBalance)
 
 # Module logger
 import logging
@@ -24,11 +26,9 @@ baseline = 'CRU'
 cfg.initialize()
 
 # Local paths (where to write the OGGM run output)
-WORKING_DIR = path.join(path.expanduser('~'), 'tmp',
-                        'OGGM_ref_mb_{}_RGIV{}_OGGM{}'.format(baseline,
-                                                              rgi_version,
-                                                              oggm.__version__)
-                        )
+dirname = 'OGGM_ref_mb_{}_RGIV{}_OGGM{}'.format(baseline, rgi_version,
+                                                oggm.__version__)
+WORKING_DIR = utils.gettempdir(dirname, home=True)
 utils.mkdir(WORKING_DIR, reset=True)
 cfg.PATHS['working_dir'] = WORKING_DIR
 
@@ -40,9 +40,6 @@ cfg.PARAMS['baseline_climate'] = baseline
 
 # No need for intersects since this has an effect on the inversion only
 cfg.PARAMS['use_intersects'] = False
-
-# This isn't necessary either - we don't do inversion
-cfg.PARAMS['filter_for_neg_flux'] = False
 
 # Use multiprocessing?
 cfg.PARAMS['use_multiprocessing'] = True
@@ -62,7 +59,7 @@ df, _ = utils.get_wgms_files()
 rids = df['RGI{}0_ID'.format(rgi_version[0])]
 
 # We can't do Antarctica
-rids = [rid for rid in rids if not '-19.' in rid]
+rids = [rid for rid in rids if not ('-19.' in rid)]
 
 # For HISTALP only RGI reg 11
 if baseline == 'HISTALP':
@@ -71,8 +68,8 @@ if baseline == 'HISTALP':
 # Make a new dataframe with those (this takes a while)
 log.info('Reading the RGI shapefiles...')
 rgidf = utils.get_rgi_glacier_entities(rids, version=rgi_version)
-log.info('For RGIV{} we have {} candidate reference glaciers.'.format(
-    rgi_version, len(rgidf)))
+log.info('For RGIV{} we have {} candidate reference '
+         'glaciers.'.format(rgi_version, len(rgidf)))
 
 # We have to check which of them actually have enough mb data.
 # Let OGGM do it:
@@ -96,12 +93,12 @@ rgidf = rgidf.loc[rgidf.RGIId.isin([g.rgi_id for g in gdirs])]
 log.info('For RGIV{} and {} we have {} reference glaciers.'.format(rgi_version,
                                                                    baseline,
                                                                    len(rgidf)))
-rgidf.to_file(path.join(WORKING_DIR, 'mb_ref_glaciers.shp'))
+rgidf.to_file(os.path.join(WORKING_DIR, 'mb_ref_glaciers.shp'))
 
 # Sort for more efficient parallel computing
 rgidf = rgidf.sort_values('Area', ascending=False)
 
-# Go - initialize working directories
+# Go - initialize glacier directories
 gdirs = workflow.init_glacier_regions(rgidf)
 
 # Prepro tasks
@@ -119,31 +116,33 @@ for task in task_list:
 
 # Climate tasks
 tasks.compute_ref_t_stars(gdirs)
-execute_entity_task(tasks.local_mustar, gdirs)
+execute_entity_task(tasks.local_t_star, gdirs)
+execute_entity_task(tasks.mu_star_calibration, gdirs)
 
 # We store the associated params
 mb_calib = gdirs[0].read_pickle('climate_info')['mb_calib_params']
-with open(path.join(WORKING_DIR, 'mb_calib_params.json'), 'w') as fp:
+with open(os.path.join(WORKING_DIR, 'mb_calib_params.json'), 'w') as fp:
     json.dump(mb_calib, fp)
 
-# Model validation
-tasks.crossval_t_stars(gdirs)  # for later
+# And also some statistics
+utils.compile_glacier_statistics(gdirs)
 
 # Tests: for all glaciers, the mass-balance around tstar and the
 # bias with observation should be approx 0
-from oggm.core.massbalance import (ConstantMassBalance, PastMassBalance)
 for gd in gdirs:
-    heights, widths = gd.get_inversion_flowline_hw()
 
-    mb_mod = ConstantMassBalance(gd, bias=0)  # bias=0 because of calib!
-    mb = mb_mod.get_specific_mb(heights, widths)
-    np.testing.assert_allclose(mb, 0, atol=10)  # numerical errors
+    mb_mod = MultipleFlowlineMassBalance(gd,
+                                         mb_model_class=ConstantMassBalance,
+                                         bias=0)  # bias=0 because of calib!
+    mb = mb_mod.get_specific_mb()
+    np.testing.assert_allclose(mb, 0, atol=5)  # atol for numerical errors
 
-    mb_mod = PastMassBalance(gd)  # Here we need the computed bias
+    mb_mod = MultipleFlowlineMassBalance(gd, mb_model_class=PastMassBalance)
+
     refmb = gd.get_ref_mb_data().copy()
-    refmb['OGGM'] = mb_mod.get_specific_mb(heights, widths, year=refmb.index)
+    refmb['OGGM'] = mb_mod.get_specific_mb(year=refmb.index)
     np.testing.assert_allclose(refmb.OGGM.mean(), refmb.ANNUAL_BALANCE.mean(),
-                               atol=10)
+                               atol=5)  # atol for numerical errors
 
 # Log
 log.info('Calibration is done!')

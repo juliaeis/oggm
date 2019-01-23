@@ -1,10 +1,6 @@
 # Python imports
-from os import path
-import oggm
-
-# Module logger
+import time
 import logging
-log = logging.getLogger(__name__)
 
 # Libs
 import salem
@@ -16,15 +12,17 @@ from oggm import tasks, utils, workflow
 from oggm.workflow import execute_entity_task
 from oggm.utils import get_demo_file
 
+# Module logger
+log = logging.getLogger(__name__)
+
 # For timing the run
-import time
 start = time.time()
 
 # Initialize OGGM and set up the default run parameters
 cfg.initialize()
 
 # Local working directory (where OGGM will write its output)
-WORKING_DIR = path.join(path.expanduser('~'), 'tmp', 'OGGM_spinup_run')
+WORKING_DIR = utils.gettempdir('OGGM_spinup_run')
 utils.mkdir(WORKING_DIR, reset=True)
 cfg.PATHS['working_dir'] = WORKING_DIR
 
@@ -56,7 +54,7 @@ rgidf = rgidf.sort_values('Area', ascending=False)
 log.info('Starting OGGM run')
 log.info('Number of glaciers: {}'.format(len(rgidf)))
 
-# Go - initialize working directories
+# Go - initialize glacier directories
 gdirs = workflow.init_glacier_regions(rgidf)
 
 # Preprocessing and climate tasks
@@ -71,22 +69,25 @@ task_list = [
     tasks.catchment_width_geom,
     tasks.catchment_width_correction,
     tasks.process_cru_data,
-    tasks.local_mustar,
-    tasks.apparent_mb,
+    tasks.local_t_star,
+    tasks.mu_star_calibration,
 ]
 for task in task_list:
     execute_entity_task(task, gdirs)
 
 # Additional climate file (CESM)
-cfg.PATHS['gcm_temp_file'] = get_demo_file('cesm.TREFHT.160001-200512.selection.nc')
-cfg.PATHS['gcm_precc_file'] = get_demo_file('cesm.PRECC.160001-200512.selection.nc')
-cfg.PATHS['gcm_precl_file'] = get_demo_file('cesm.PRECL.160001-200512.selection.nc')
+cfg.PATHS['cesm_temp_file'] = get_demo_file('cesm.TREFHT.160001-200512'
+                                            '.selection.nc')
+cfg.PATHS['cesm_precc_file'] = get_demo_file('cesm.PRECC.160001-200512'
+                                             '.selection.nc')
+cfg.PATHS['cesm_precl_file'] = get_demo_file('cesm.PRECL.160001-200512'
+                                             '.selection.nc')
 execute_entity_task(tasks.process_cesm_data, gdirs)
 
 # Inversion tasks
 execute_entity_task(tasks.prepare_for_inversion, gdirs)
 # We use the default parameters for this run
-execute_entity_task(tasks.volume_inversion, gdirs, glen_a=cfg.A, fs=0)
+execute_entity_task(tasks.mass_conservation_inversion, gdirs)
 execute_entity_task(tasks.filter_inversion_output, gdirs)
 
 # Final preparation for the run
@@ -95,7 +96,7 @@ execute_entity_task(tasks.init_present_time_glacier, gdirs)
 # Run the last 200 years with the default starting point (current glacier)
 # and CESM data as input
 execute_entity_task(tasks.run_from_climate_data, gdirs,
-                    climate_filename='cesm_data',
+                    climate_filename='gcm_data',
                     ys=1801, ye=2000,
                     output_filesuffix='_no_spinup')
 
@@ -105,14 +106,14 @@ execute_entity_task(tasks.run_constant_climate, gdirs,
                     output_filesuffix='_spinup')
 # Run a past climate run based on this spinup
 execute_entity_task(tasks.run_from_climate_data, gdirs,
-                    climate_filename='cesm_data',
+                    climate_filename='gcm_data',
                     ys=1801, ye=2000,
                     init_model_filesuffix='_spinup',
                     output_filesuffix='_with_spinup')
 
 # Compile output
 log.info('Compiling output')
-utils.glacier_characteristics(gdirs)
+utils.compile_glacier_statistics(gdirs)
 ds1 = utils.compile_run_output(gdirs, filesuffix='_no_spinup')
 ds2 = utils.compile_run_output(gdirs, filesuffix='_with_spinup')
 

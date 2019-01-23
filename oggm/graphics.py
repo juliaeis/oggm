@@ -5,7 +5,6 @@ import logging
 from collections import OrderedDict
 import itertools
 
-import geopandas as gpd
 import matplotlib.colors as colors
 import matplotlib.pyplot as plt
 import numpy as np
@@ -13,20 +12,29 @@ import salem
 import shapely.geometry as shpg
 from matplotlib import cm as colormap
 
+try:
+    # optional python-colorspace dependency for better (HCL-based) colormaps
+    from colorspace import sequential_hcl
+    USE_HCL_CMAP = True
+except ImportError:
+    USE_HCL_CMAP = False
+
 from oggm.core.flowline import FileModel
 from oggm import cfg, utils
 
 # Module logger
 log = logging.getLogger(__name__)
 
-
-def _tolist(gdirs):
-    """Ensures that we have a list"""
-    try:
-        _ = (e for e in gdirs)
-    except TypeError:
-        gdirs = [gdirs]
-    return gdirs
+# Set global colormaps
+ALTITUDE_CMAP = colormap.terrain
+if USE_HCL_CMAP:
+    CMAP_DIVS = 100  # number of discrete colours from continuous colormaps
+    THICKNESS_CMAP = sequential_hcl("Blue-Yellow", rev=True).cmap(CMAP_DIVS)
+    SECTION_THICKNESS_CMAP = THICKNESS_CMAP
+    GLACIER_THICKNESS_CMAP = THICKNESS_CMAP
+else:
+    SECTION_THICKNESS_CMAP = plt.cm.get_cmap('YlOrRd')
+    GLACIER_THICKNESS_CMAP = plt.get_cmap('viridis')
 
 
 def truncate_colormap(cmap, minval=0.0, maxval=1.0, n=256):
@@ -60,7 +68,7 @@ def _plot_map(plotfunc):
     Decorator for common salem.Map plotting logic
     """
     commondoc = """
-    
+
     Parameters
     ----------
     gdirs : [] or GlacierDirectory, required
@@ -85,8 +93,10 @@ def _plot_map(plotfunc):
     cbar_ax: ax, optional
         ax where to plot the colorbar
     autosave : bool, optional
-        set to True to override to a default savefig filename (useful 
+        set to True to override to a default savefig filename (useful
         for multiprocessing)
+    figsize : tuple, optional
+        size of the figure
     savefig : str, optional
         save the figure to a file instead of displaying it
     savefig_kwargs : dict, optional
@@ -100,17 +110,18 @@ def _plot_map(plotfunc):
     def newplotfunc(gdirs, ax=None, smap=None, add_colorbar=True, title=None,
                     title_comment=None, horizontal_colorbar=False,
                     lonlat_contours_kwargs=None, cbar_ax=None, autosave=False,
-                    add_scalebar=True, savefig=None, savefig_kwargs=None,
+                    add_scalebar=True, figsize=None, savefig=None,
+                    savefig_kwargs=None,
                     **kwargs):
 
         dofig = False
         if ax is None:
-            fig = plt.figure()
+            fig = plt.figure(figsize=figsize)
             ax = fig.add_subplot(111)
             dofig = True
 
         # Cast to list
-        gdirs = _tolist(gdirs)
+        gdirs = utils.tolist(gdirs)
 
         if smap is None:
             mp = salem.Map(gdirs[0].grid, countries=False,
@@ -167,22 +178,22 @@ def _plot_map(plotfunc):
                                    gdirs[0].rgi_id + '.png')
 
         if savefig is not None:
-            plt.savefig(savefig, savefig_kwargs=savefig_kwargs)
+            plt.savefig(savefig, **savefig_kwargs)
             plt.close()
 
     return newplotfunc
 
 
-def plot_googlemap(gdirs, ax=None):
+def plot_googlemap(gdirs, ax=None, figsize=None):
     """Plots the glacier(s) over a googlemap."""
 
     dofig = False
     if ax is None:
-        fig = plt.figure()
+        fig = plt.figure(figsize=figsize)
         ax = fig.add_subplot(111)
         dofig = True
 
-    gdirs = _tolist(gdirs)
+    gdirs = utils.tolist(gdirs)
 
     xx, yy = [], []
     for gdir in gdirs:
@@ -197,7 +208,7 @@ def plot_googlemap(gdirs, ax=None):
     cmap.set_rgb(img)
 
     for gdir in gdirs:
-        cmap.set_shapefile(gdir.get_filepath('outlines'))
+        cmap.set_shapefile(gdir.read_shapefile('outlines'))
 
     cmap.plot(ax)
     title = ''
@@ -225,7 +236,7 @@ def plot_domain(gdirs, ax=None, smap=None):
     except ValueError:
         pass
 
-    cm = truncate_colormap(colormap.terrain, minval=0.25, maxval=1.0, n=256)
+    cm = truncate_colormap(ALTITUDE_CMAP, minval=0.25, maxval=1.0, n=256)
     smap.set_cmap(cm)
     smap.set_plot_params(nlevels=256)
 
@@ -236,7 +247,7 @@ def plot_domain(gdirs, ax=None, smap=None):
         # Plot boundaries
         poly_pix = geom['polygon_pix']
         smap.set_geometry(poly_pix, crs=crs, fc='white',
-                              alpha=0.3, zorder=2, linewidth=.2)
+                          alpha=0.3, zorder=2, linewidth=.2)
         for l in poly_pix.interiors:
             smap.set_geometry(l, crs=crs, color='black', linewidth=0.5)
 
@@ -247,7 +258,8 @@ def plot_domain(gdirs, ax=None, smap=None):
 
 @_plot_map
 def plot_centerlines(gdirs, ax=None, smap=None, use_flowlines=False,
-                     add_downstream=False, lines_cmap='Set1'):
+                     add_downstream=False, lines_cmap='Set1',
+                     add_line_index=False, use_model_flowlines=False):
     """Plots the centerlines of a glacier directory."""
 
     if add_downstream and not use_flowlines:
@@ -255,14 +267,16 @@ def plot_centerlines(gdirs, ax=None, smap=None, use_flowlines=False,
 
     # Files
     filename = 'centerlines'
-    if use_flowlines:
+    if use_model_flowlines:
+        filename = 'model_flowlines'
+    elif use_flowlines:
         filename = 'inversion_flowlines'
 
     gdir = gdirs[0]
     with utils.ncDataset(gdir.get_filepath('gridded_data')) as nc:
         topo = nc.variables['topo'][:]
 
-    cm = truncate_colormap(colormap.terrain, minval=0.25, maxval=1.0, n=256)
+    cm = truncate_colormap(ALTITUDE_CMAP, minval=0.25, maxval=1.0, n=256)
     smap.set_cmap(cm)
     smap.set_plot_params(nlevels=256)
     smap.set_data(topo)
@@ -284,8 +298,9 @@ def plot_centerlines(gdirs, ax=None, smap=None, use_flowlines=False,
 
         # Go in reverse order for red always being the longuest
         cls = cls[::-1]
+        nl = len(cls)
         color = gencolor(len(cls) + 1, cmap=lines_cmap)
-        for l, c in zip(cls, color):
+        for i, (l, c) in enumerate(zip(cls, color)):
             if add_downstream and not gdir.is_tidewater and l is cls[0]:
                 line = gdir.read_pickle('downstream_line')['full_line']
             else:
@@ -293,8 +308,11 @@ def plot_centerlines(gdirs, ax=None, smap=None, use_flowlines=False,
 
             smap.set_geometry(line, crs=crs, color=c,
                               linewidth=2.5, zorder=50)
+
+            text = '{}'.format(nl - i - 1) if add_line_index else None
             smap.set_geometry(l.head, crs=gdir.grid, marker='o',
-                              markersize=60, alpha=0.8, color=c, zorder=99)
+                              markersize=60, alpha=0.8, color=c, zorder=99,
+                              text=text)
 
             for j in l.inflow_points:
                 smap.set_geometry(j, crs=crs, marker='o',
@@ -327,7 +345,7 @@ def plot_catchment_areas(gdirs, ax=None, smap=None, lines_cmap='Set1',
     # Plot boundaries
     poly_pix = geom['polygon_pix']
     smap.set_geometry(poly_pix, crs=crs, fc='none', zorder=2,
-                         linewidth=.2)
+                      linewidth=.2)
     for l in poly_pix.interiors:
         smap.set_geometry(l, crs=crs, color='black', linewidth=0.5)
 
@@ -336,10 +354,10 @@ def plot_catchment_areas(gdirs, ax=None, smap=None, lines_cmap='Set1',
     color = gencolor(len(cls) + 1, cmap=lines_cmap)
     for l, c in zip(cls, color):
         smap.set_geometry(l.line, crs=crs, color=c,
-                             linewidth=2.5, zorder=50)
+                          linewidth=2.5, zorder=50)
 
     # catchment areas
-    cis = gdir.read_pickle('catchment_indices')
+    cis = gdir.read_pickle('geometries')['catchment_indices']
     for j, ci in enumerate(cis[::-1]):
         mask[tuple(ci.T)] = j+1
 
@@ -383,7 +401,7 @@ def plot_catchment_width(gdirs, ax=None, smap=None, corrected=False,
 
         # Plot intersects
         if add_intersects and gdir.has_file('intersects'):
-            gdf = gpd.read_file(gdir.get_filepath('intersects'))
+            gdf = gdir.read_shapefile('intersects')
             smap.set_shapefile(gdf, color='k', linewidth=3.5, zorder=3)
 
         # plot Centerlines
@@ -460,15 +478,14 @@ def plot_inversion(gdirs, ax=None, smap=None, linewidth=3, vmax=None):
                               linewidth=1.2, zorder=50)
             toplot_th = np.append(toplot_th, c['thick'])
             for wi, cur, (n1, n2) in zip(l.widths, l.line.coords, l.normals):
-                l = shpg.LineString([shpg.Point(cur + wi / 2. * n1),
-                                     shpg.Point(cur + wi / 2. * n2)])
-                toplot_lines.append(l)
+                line = shpg.LineString([shpg.Point(cur + wi / 2. * n1),
+                                        shpg.Point(cur + wi / 2. * n2)])
+                toplot_lines.append(line)
                 toplot_crs.append(crs)
             vol.extend(c['volume'])
 
-    cm = plt.cm.get_cmap('YlOrRd')
-    dl = salem.DataLevels(cmap=cm, nlevels=256, data=toplot_th,
-                          vmin=0, vmax=vmax)
+    dl = salem.DataLevels(cmap=SECTION_THICKNESS_CMAP, nlevels=256,
+                          data=toplot_th, vmin=0, vmax=vmax)
     colors = dl.to_rgb()
     for l, c, crs in zip(toplot_lines, colors, toplot_crs):
         smap.set_geometry(l, crs=crs, color=c,
@@ -518,7 +535,7 @@ def plot_distributed_thickness(gdirs, ax=None, smap=None, varname_suffix=''):
     for l in poly_pix.interiors:
         smap.set_geometry(l, crs=crs, color='black', linewidth=0.5)
 
-    smap.set_cmap(plt.get_cmap('viridis'))
+    smap.set_cmap(GLACIER_THICKNESS_CMAP)
     smap.set_plot_params(nlevels=256)
     smap.set_data(thick)
 
@@ -543,7 +560,6 @@ def plot_modeloutput_map(gdirs, ax=None, smap=None, model=None,
     except ValueError:
         pass
 
-
     toplot_th = np.array([])
     toplot_lines = []
     toplot_crs = []
@@ -556,15 +572,21 @@ def plot_modeloutput_map(gdirs, ax=None, smap=None, model=None,
             model.run_until(modelyr)
             models.append(model)
     else:
-        models = _tolist(model)
+        models = utils.tolist(model)
     for gdir, model in zip(gdirs, models):
         geom = gdir.read_pickle('geometries')
         poly_pix = geom['polygon_pix']
 
         crs = gdir.grid.center_grid
         smap.set_geometry(poly_pix, crs=crs, fc='none', zorder=2, linewidth=.2)
-        for l in poly_pix.interiors:
-            smap.set_geometry(l, crs=crs, color='black', linewidth=0.5)
+
+        if isinstance(poly_pix, shpg.MultiPolygon):
+            for _poly in poly_pix:
+                for l in _poly.interiors:
+                    smap.set_geometry(l, crs=crs, color='black', linewidth=0.5)
+        else:
+            for l in poly_pix.interiors:
+                smap.set_geometry(l, crs=crs, color='black', linewidth=0.5)
 
         # plot Centerlines
         cls = model.fls
@@ -575,14 +597,13 @@ def plot_modeloutput_map(gdirs, ax=None, smap=None, model=None,
             widths = l.widths.copy()
             widths = np.where(l.thick > 0, widths, 0.)
             for wi, cur, (n1, n2) in zip(widths, l.line.coords, l.normals):
-                l = shpg.LineString([shpg.Point(cur + wi/2. * n1),
-                                     shpg.Point(cur + wi/2. * n2)])
-                toplot_lines.append(l)
+                line = shpg.LineString([shpg.Point(cur + wi/2. * n1),
+                                        shpg.Point(cur + wi/2. * n2)])
+                toplot_lines.append(line)
                 toplot_crs.append(crs)
 
-    cm = plt.cm.get_cmap('YlOrRd')
-    dl = salem.DataLevels(cmap=cm, nlevels=256, data=toplot_th,
-                          vmin=0, vmax=vmax)
+    dl = salem.DataLevels(cmap=SECTION_THICKNESS_CMAP, nlevels=256,
+                          data=toplot_th, vmin=0, vmax=vmax)
     colors = dl.to_rgb()
     for l, c, crs in zip(toplot_lines, colors, toplot_crs):
         smap.set_geometry(l, crs=crs, color=c,
@@ -608,7 +629,7 @@ def plot_modeloutput_section(model=None, ax=None, title=''):
     bed = np.array([])
     for cls in model.fls:
         a = cls.widths_m * cls.dx_meter * 1e-6
-        a = np.where(cls.thick>0, a, 0)
+        a = np.where(cls.thick > 0, a, 0)
         area = np.concatenate((area, a))
         height = np.concatenate((height, cls.surface_h))
         bed = np.concatenate((bed, cls.bed_h))

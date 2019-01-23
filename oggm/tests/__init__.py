@@ -1,22 +1,12 @@
-import logging
 import os
-import socket
-import sys
-import unittest
-import functools
 from distutils.version import LooseVersion
 
+import pytest
 import matplotlib.ft2font
-import matplotlib.pyplot as plt
-import osgeo.gdal
-from urllib.request import urlopen
+from urllib.request import urlopen, URLError
 
 from oggm import cfg
 from oggm.utils import SAMPLE_DATA_COMMIT
-
-# Defaults
-logging.basicConfig(format='%(asctime)s: %(name)s: %(message)s',
-                    datefmt='%Y-%m-%d %H:%M:%S', level=logging.DEBUG)
 
 # Some logic to see which environment we are running on
 
@@ -37,5 +27,11 @@ if LooseVersion(matplotlib.__version__) >= LooseVersion('2'):
 try:
     _ = urlopen('http://www.google.com', timeout=1)
     HAS_INTERNET = True
-except:
+except URLError:
     HAS_INTERNET = False
+
+
+def mpl_image_compare(baseline_dir=BASELINE_DIR, tolerance=5, **kwargs):
+    return pytest.mark.mpl_image_compare(baseline_dir=baseline_dir,
+                                         tolerance=tolerance,
+                                         **kwargs)

@@ -13,7 +13,7 @@ import oggm.cfg as cfg
 from oggm.core import gis, inversion, climate, centerlines, flowline
 from oggm.utils import get_demo_file, mkdir
 from oggm.workflow import execute_entity_task
-from oggm.utils import _urlretrieve
+from oggm.utils import oggm_urlretrieve
 
 
 def dummy_constant_bed(hmax=3000., hmin=1000., nx=200, map_dx=100.,
@@ -24,7 +24,7 @@ def dummy_constant_bed(hmax=3000., hmin=1000., nx=200, map_dx=100.,
     surface_h = np.linspace(hmax, hmin, nx)
     bed_h = surface_h
     widths = surface_h * 0. + widths
-    coords = np.arange(0, nx- 0.5, 1)
+    coords = np.arange(0, nx - 0.5, 1)
     line = shpg.LineString(np.vstack([coords, coords * 0.]).T)
     return [flowline.RectangularBedFlowline(line, dx, map_dx, surface_h,
                                             bed_h, widths)]
@@ -205,7 +205,7 @@ def dummy_width_bed_tributary(map_dx=100.):
     coords = np.arange(0, 19.1, 1)
     line = shpg.LineString(np.vstack([coords, coords * 0. + 1]).T)
     fl_1 = flowline.RectangularBedFlowline(line, dx, map_dx, surface_h[0:20],
-                                         bed_h[0:20], widths[0:20])
+                                           bed_h[0:20], widths[0:20])
     fl_1.set_flows_to(fl_0)
     return [fl_1, fl_0]
 
@@ -214,14 +214,15 @@ def patch_url_retrieve_github(url, *args, **kwargs):
     """A simple patch to OGGM's download function to make sure we don't
     download elsewhere than expected."""
 
-    assert 'github' in url
-    return _urlretrieve(url, *args, **kwargs)
+    assert ('github' in url or
+            'cluster.klima.uni-bremen.de/data/gdirs/' in url)
+    return oggm_urlretrieve(url, *args, **kwargs)
 
 
 def use_multiprocessing():
     try:
         return strtobool(os.getenv("OGGM_TEST_MULTIPROC", "True"))
-    except:
+    except BaseException:
         return True
 
 
@@ -247,15 +248,10 @@ def get_test_dir():
     return out
 
 
-def init_hef(reset=False, border=40, invert_with_sliding=True,
-             invert_with_rectangular=True):
+def init_hef(reset=False, border=40):
 
     # test directory
     testdir = os.path.join(get_test_dir(), 'tmp_border{}'.format(border))
-    if not invert_with_sliding:
-        testdir += '_withoutslide'
-    if not invert_with_rectangular:
-        testdir += '_withoutrectangular'
     if not os.path.exists(testdir):
         os.makedirs(testdir)
         reset = True
@@ -268,7 +264,6 @@ def init_hef(reset=False, border=40, invert_with_sliding=True,
     cfg.PARAMS['baseline_climate'] = ''
     cfg.PATHS['working_dir'] = testdir
     cfg.PARAMS['border'] = border
-    cfg.PARAMS['use_optimized_inversion_params'] = True
 
     hef_file = get_demo_file('Hintereisferner_RGI5.shp')
     entity = gpd.read_file(hef_file).iloc[0]
@@ -292,56 +287,39 @@ def init_hef(reset=False, border=40, invert_with_sliding=True,
     centerlines.catchment_width_geom(gdir)
     centerlines.catchment_width_correction(gdir)
     climate.process_custom_climate_data(gdir)
-    climate.mu_candidates(gdir)
     mbdf = gdir.get_ref_mb_data()['ANNUAL_BALANCE']
-    res = climate.t_star_from_refmb(gdir, mbdf)
-    climate.local_mustar(gdir, tstar=res['t_star'], bias=res['bias'])
-    climate.apparent_mb(gdir)
+    res = climate.t_star_from_refmb(gdir, mbdf=mbdf)
+    climate.local_t_star(gdir, tstar=res['t_star'], bias=res['bias'])
+    climate.mu_star_calibration(gdir)
 
-    inversion.prepare_for_inversion(gdir, add_debug_var=True,
-                                    invert_with_rectangular=invert_with_rectangular)
+    inversion.prepare_for_inversion(gdir, add_debug_var=True)
+
     ref_v = 0.573 * 1e9
 
-    if invert_with_sliding:
-        def to_optimize(x):
-            # For backwards compat
-            _fd = 1.9e-24 * x[0]
-            glen_a = (cfg.N+2) * _fd / 2.
-            fs = 5.7e-20 * x[1]
-            v, _ = inversion.mass_conservation_inversion(gdir, fs=fs,
-                                                         glen_a=glen_a)
-            return (v - ref_v)**2
+    glen_n = cfg.PARAMS['glen_n']
 
-        out = optimization.minimize(to_optimize, [1, 1],
-                                    bounds=((0.01, 10), (0.01, 10)),
-                                    tol=1e-4)['x']
-        _fd = 1.9e-24 * out[0]
-        glen_a = (cfg.N+2) * _fd / 2.
-        fs = 5.7e-20 * out[1]
+    def to_optimize(x):
+        # For backwards compat
+        _fd = 1.9e-24 * x[0]
+        glen_a = (glen_n+2) * _fd / 2.
+        fs = 5.7e-20 * x[1]
         v, _ = inversion.mass_conservation_inversion(gdir, fs=fs,
-                                                     glen_a=glen_a,
-                                                     write=True)
-    else:
-        def to_optimize(x):
-            glen_a = cfg.A * x[0]
-            v, _ = inversion.mass_conservation_inversion(gdir, fs=0.,
-                                                         glen_a=glen_a)
-            return (v - ref_v)**2
+                                                     glen_a=glen_a)
+        return (v - ref_v)**2
 
-        out = optimization.minimize(to_optimize, [1],
-                                    bounds=((0.01, 10),),
-                                    tol=1e-4)['x']
-        glen_a = cfg.A * out[0]
-        fs = 0.
-        v, _ = inversion.mass_conservation_inversion(gdir, fs=fs,
-                                                     glen_a=glen_a,
-                                                     write=True)
+    out = optimization.minimize(to_optimize, [1, 1],
+                                bounds=((0.01, 10), (0.01, 10)),
+                                tol=1e-4)['x']
+    _fd = 1.9e-24 * out[0]
+    glen_a = (glen_n+2) * _fd / 2.
+    fs = 5.7e-20 * out[1]
+    v, _ = inversion.mass_conservation_inversion(gdir, fs=fs,
+                                                 glen_a=glen_a,
+                                                 write=True)
+
     d = dict(fs=fs, glen_a=glen_a)
     d['factor_glen_a'] = out[0]
-    try:
-        d['factor_fs'] = out[1]
-    except IndexError:
-        d['factor_fs'] = 0.
+    d['factor_fs'] = out[1]
     gdir.write_pickle(d, 'inversion_params')
 
     # filter
@@ -353,3 +331,25 @@ def init_hef(reset=False, border=40, invert_with_sliding=True,
     flowline.init_present_time_glacier(gdir)
 
     return gdir
+
+
+class TempEnvironmentVariable:
+    """Context manager for environment variables
+
+    https://gist.github.com/devhero/7e015f0ce0abacab3880d33c26f07674
+    """
+    def __init__(self, **kwargs):
+        self.envs = kwargs
+
+    def __enter__(self):
+        self.old_envs = {}
+        for k, v in self.envs.items():
+            self.old_envs[k] = os.environ.get(k)
+            os.environ[k] = v
+
+    def __exit__(self, *args):
+        for k, v in self.old_envs.items():
+            if v:
+                os.environ[k] = v
+            else:
+                del os.environ[k]

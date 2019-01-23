@@ -6,7 +6,6 @@ import geopandas as gpd
 import shapely.geometry as shpg
 
 # Locals
-import oggm
 import oggm.cfg as cfg
 from oggm import utils, workflow
 
@@ -20,7 +19,7 @@ rgi_version = '61'
 rgi_region = '11'  # Alps
 
 # Local working directory (where OGGM will write its output)
-WORKING_DIR = os.path.join(os.path.expanduser('~'), 'tmp', 'OGGM_Rofental')
+WORKING_DIR = utils.gettempdir('OGGM_Rofental')
 utils.mkdir(WORKING_DIR, reset=True)
 cfg.PATHS['working_dir'] = WORKING_DIR
 
@@ -36,7 +35,7 @@ rgidf = gpd.read_file(path)
 path = utils.get_demo_file('rofental_hydrosheds.shp')
 basin = gpd.read_file(path)
 
-# Take all glaciers in the Rhone Basin
+# Take all glaciers in the Rofental Basin
 in_bas = [basin.geometry.contains(shpg.Point(x, y))[0] for
           (x, y) in zip(rgidf.CenLon, rgidf.CenLat)]
 rgidf = rgidf.loc[in_bas]
@@ -49,7 +48,7 @@ rgidf = rgidf.sort_values('Area', ascending=False)
 print('Starting OGGM run')
 print('Number of glaciers: {}'.format(len(rgidf)))
 
-# Go - initialize working directories
+# Go - initialize glacier directories
 gdirs = workflow.init_glacier_regions(rgidf)
 
 # Tasks shortcuts - see the next examples for more details
@@ -59,7 +58,7 @@ workflow.inversion_tasks(gdirs)
 
 # Compile output
 print('Compiling output')
-utils.glacier_characteristics(gdirs)
+utils.compile_glacier_statistics(gdirs)
 utils.write_centerlines_to_shape(gdirs)
 
 # Log
