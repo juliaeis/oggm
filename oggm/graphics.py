@@ -136,7 +136,7 @@ def _plot_map(plotfunc):
                 else:
                     cb = cbprim.append_colorbar(ax, "right", size="5%",
                                                 pad=0.2)
-            cb.set_label(out['cbar_label'])
+            cb.set_label(out['cbar_label'],size=30)
 
         if title is None:
             if 'title' not in out:
@@ -155,7 +155,7 @@ def _plot_map(plotfunc):
             out['title'] += title_comment
             ax.set_title(out['title'])
         else:
-            ax.set_title(title)
+            ax.set_title(title,size=20)
 
         if dofig:
             plt.tight_layout()
@@ -242,7 +242,7 @@ def plot_domain(gdirs, ax=None, smap=None):
 
     smap.plot(ax)
 
-    return dict(cbar_label='Alt. [m]')
+    return dict(cbar_label=r'Altitude (m)',labelsize=30)
 
 
 @_plot_map
@@ -302,8 +302,8 @@ def plot_centerlines(gdirs, ax=None, smap=None, use_flowlines=False,
                                   zorder=99, facecolor='none')
 
     smap.plot(ax)
-    return dict(cbar_label='Alt. [m]')
-
+    return dict(cbar_label='Altitude (m)')
+    #return smap
 
 @_plot_map
 def plot_catchment_areas(gdirs, ax=None, smap=None, lines_cmap='Set1',
