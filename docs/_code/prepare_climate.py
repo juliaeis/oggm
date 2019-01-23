@@ -1,5 +1,4 @@
 import os
-
 import geopandas as gpd
 import matplotlib.pyplot as plt
 import numpy as np
@@ -10,16 +9,15 @@ import oggm
 from oggm import cfg, tasks
 from oggm.core.climate import (mb_yearly_climate_on_glacier,
                                t_star_from_refmb,
-                               local_mustar, apparent_mb)
+                               local_t_star, mu_star_calibration)
 from oggm.core.massbalance import (ConstantMassBalance)
-from oggm.utils import get_demo_file
-from oggm import graphics
+from oggm.utils import get_demo_file, gettempdir
 
 cfg.initialize()
 cfg.set_intersects_db(get_demo_file('rgi_intersect_oetztal.shp'))
 cfg.PATHS['dem_file'] = get_demo_file('hef_srtm.tif')
 
-base_dir = os.path.join(oggm.gettempdir(), 'Climate')
+base_dir = gettempdir('Climate_docs')
 entity = gpd.read_file(get_demo_file('HEF_MajDivide.shp')).iloc[0]
 gdir = oggm.GlacierDirectory(entity, base_dir=base_dir)
 
@@ -36,18 +34,18 @@ cfg.PATHS['cru_dir'] = os.path.dirname(data_dir)
 cfg.PARAMS['baseline_climate'] = 'HISTALP'
 cfg.PARAMS['baseline_y0'] = 1850
 tasks.process_histalp_data(gdir)
-tasks.mu_candidates(gdir)
+tasks.glacier_mu_candidates(gdir)
 
 mbdf = gdir.get_ref_mb_data()
-res = t_star_from_refmb(gdir, mbdf.ANNUAL_BALANCE)
-local_mustar(gdir, tstar=res['t_star'], bias=res['bias'], reset=True)
-apparent_mb(gdir, reset=True)
+res = t_star_from_refmb(gdir, mbdf=mbdf.ANNUAL_BALANCE)
+local_t_star(gdir, tstar=res['t_star'], bias=res['bias'], reset=True)
+mu_star_calibration(gdir, reset=True)
 
 # For flux plot
 tasks.prepare_for_inversion(gdir, add_debug_var=True)
 
 # For plots
-mu_yr_clim = gdir.read_pickle('climate_info')['mu_candidates']
+mu_yr_clim = gdir.read_pickle('climate_info')['mu_candidates_glacierwide']
 years, temp_yr, prcp_yr = mb_yearly_climate_on_glacier(gdir)
 
 # which years to look at
@@ -64,18 +62,19 @@ diff = mb_per_mu - ref_mb
 pdf = pd.DataFrame()
 pdf[r'$\mu (t)$'] = mu_yr_clim
 pdf['bias'] = diff
-res = t_star_from_refmb(gdir, mbdf.ANNUAL_BALANCE)
+res = t_star_from_refmb(gdir, mbdf=mbdf.ANNUAL_BALANCE)
 
 # For the mass flux
 cl = gdir.read_pickle('inversion_input')[-1]
 mbmod = ConstantMassBalance(gdir)
-mbx = mbmod.get_annual_mb(cl['hgt']) * cfg.SEC_IN_YEAR * cfg.RHO
+mbx = (mbmod.get_annual_mb(cl['hgt']) * cfg.SEC_IN_YEAR *
+       cfg.PARAMS['ice_density'])
 fdf = pd.DataFrame(index=np.arange(len(mbx))*cl['dx'])
 fdf['Flux'] = cl['flux']
 fdf['Mass balance'] = mbx
 
 # For the distributed thickness
-tasks.volume_inversion(gdir, glen_a=cfg.A*3, fs=0)
+tasks.mass_conservation_inversion(gdir, glen_a=2.4e-24 * 3, fs=0)
 tasks.distribute_thickness_per_altitude(gdir)
 
 
@@ -84,8 +83,9 @@ def example_plot_temp_ts():
     d = xr.open_dataset(gdir.get_filepath('climate_monthly'))
     temp = d.temp.resample(time='12MS').mean('time').to_series()
     del temp.index.name
-    ax = temp.plot(figsize=(8, 4), label='Annual temp')
-    temp.rolling(31, center=True, min_periods=15).mean().plot(label='31-yr avg')
+    temp.plot(figsize=(8, 4), label='Annual temp')
+    tsm = temp.rolling(31, center=True, min_periods=15).mean()
+    tsm.plot(label='31-yr avg')
     plt.legend(loc='best')
     plt.title('HISTALP annual temperature, Hintereisferner')
     plt.ylabel(r'degC')
@@ -94,8 +94,9 @@ def example_plot_temp_ts():
 
 
 def example_plot_mu_ts():
-    ax = mu_yr_clim.plot(figsize=(8, 4), label=r'$\mu (t)$');
-    plt.legend(loc='best'); plt.title(r'$\mu$ candidates Hintereisferner');
+    mu_yr_clim.plot(figsize=(8, 4), label=r'$\mu (t)$')
+    plt.legend(loc='best')
+    plt.title(r'$\mu$ candidates Hintereisferner')
     plt.ylabel(r'$\mu$ (mm yr$^{-1}$ K$^{-1}$)')
     plt.tight_layout()
     plt.show()
@@ -104,8 +105,8 @@ def example_plot_mu_ts():
 def example_plot_bias_ts():
     ax = pdf.plot(figsize=(8, 4), secondary_y='bias')
     plt.hlines(0, 1800, 2015, linestyles='-')
-    ax.set_ylabel(r'$\mu$ (mm yr$^{-1}$ K$^{-1}$)');
-    ax.set_title(r'$\mu$ candidates HEF');
+    ax.set_ylabel(r'$\mu$ (mm yr$^{-1}$ K$^{-1}$)')
+    ax.set_title(r'$\mu$ candidates HEF')
     plt.ylabel(r'bias (mm yr$^{-1}$)')
     yl = plt.gca().get_ylim()
     plt.plot((res['t_star'], res['t_star']), (yl[0], 0),

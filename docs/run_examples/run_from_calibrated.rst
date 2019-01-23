@@ -77,7 +77,7 @@ Some analyses
 -------------
 
 The output directory contains the compiled output files from the run. The
-``glacier_characteristics.csv`` file contains various information about each
+``glacier_statistics.csv`` file contains various information about each
 glacier after the preprocessing, either from the RGI directly
 (location, name, glacier type...) or from the model itself (hypsometry,
 inversion model output...).
@@ -86,10 +86,11 @@ Here is an example of how to read the file:
 
 .. code-block:: python
 
-    from os import path
+    import os
     import pandas as pd
-    WORKING_DIR = path.join(path.expanduser('~'), 'tmp', 'OGGM_precalibrated_run')
-    df = pd.read_csv(path.join(WORKING_DIR, 'glacier_characteristics.csv'))
+    from oggm.utils import gettempdir
+    WORKING_DIR = gettempdir('OGGM_precalibrated_run')
+    df = pd.read_csv(path.join(WORKING_DIR, 'glacier_statistics.csv'))
     print(df)
 
 Output (reduced for clarity):

@@ -7,11 +7,22 @@ Version history
 v1.X (unreleased)
 -----------------
 
+New contributors to the project:
+
+- **Matthias Dusch** (PhD student, University of Innsbruck), added extensive
+  cross-validation tools and an associated website.
+- **Philipp Gregor** (Master student, University of Innsbruck), added options
+  to switch on lateral bed stress in the flowline ice dynamics
+- **Nicolas Champollion** (PostDoc, University of Bremen), added GCM data
+  IO routines.
+- **Sadie Bartholomew** (Software Engineer, UK Met Office), added ability to
+  replace colormaps in graphics with HCL-based colors using python-colorspace.
+
 Breaking changes
 ~~~~~~~~~~~~~~~~
 
 - The utils.copy_to_basedir() function is changed to being an entity task. In
-  addition cesm_data files, when present, will from now on always be copied
+  addition gcm_data files, when present, will from now on always be copied
   when using this task (:issue:`467` & :pull:`468`).
   By `Anouk Vlug <https://github.com/anoukvlug>`_.
 - Accumulation Area Ratio (AAR) is now correctly computed (:issue:`361`).
@@ -47,11 +58,40 @@ Breaking changes
   steps anyways.
   By `Fabien Maussion <https://github.com/fmaussion>`_.
 - The list of reference t* dates is now generated differently: instead of
-  the complex (and sort of useless) neirest beighbor algorithm we are now
+  the complex (and sort of useless) nearest neighbor algorithm we are now
   referring back to the original method of Marzeion et al. (2012). This comes
   together with other breaking changes, altogether likely to change the
   results of the mass-balance model for some glaciers. For more details see
   the PR: :pull:`509`
+  By `Fabien Maussion <https://github.com/fmaussion>`_.
+- The ice dynamics parameters (Glen A, N, ice density) are now "real"
+  parameters accessible via ``cfg.PARAMS`` (:pull:`520`, :issue:`511` and
+  :issue:`27`). Previously, they were also accessible via a module attribute
+  in ``cfg``, which was more confusing than helping. Deprecated and removed
+  a couple of other things on the go, such as the dangerous `
+  ``optimize_inversion_params`` task (this cannot be optimized yet) and the
+  useless ``volume_inversion`` wrapper (now called
+  ``mass_conservation_inversion``)
+  By `Fabien Maussion <https://github.com/fmaussion>`_.
+- The temperature sensitivity mu* is now flowline specific, instead of
+  glacier wide. This change was necessary because it now allows low-lying
+  tributaries to exist, despite of too high glacier wide mu*. This change
+  had some wider reaching consequences in the code base and in the
+  mass-balance models in particular: :pull:`539`. This will also allow to
+  merge neighboring glaciers in the future.
+  By `Fabien Maussion <https://github.com/fmaussion>`_.
+- The "human readable" mu* information is now stored in a JSON dict instead
+  of a csv: :pull:`568`.
+  By `Fabien Maussion <https://github.com/fmaussion>`_.
+- The global task `glacier_characteristics` has been renamed to
+  `compile_glacier_statistics` (:pull:`571`).
+  By `Fabien Maussion <https://github.com/fmaussion>`_.
+- The ``process_cesm_data`` task has been been moved to `gcm_climate.py`
+  adressing: :issue:`469` & :pull:`582`.
+  By `Anouk Vlug <https://github.com/anoukvlug>`_.
+- The shapefiles are now stored in the glacier directories as compressed
+  tar files, adressing :issue:`367` & :issue:`615`. This option can be
+  turned off with `cfg.PARAMS['use_tar_shapefiles'] = False`.
   By `Fabien Maussion <https://github.com/fmaussion>`_.
 
 Enhancements
@@ -109,6 +149,36 @@ Enhancements
   also adds some safety checks at the calibration and computation of the
   mass-balance to make sure there is no misused parameters (:pull:`493`).
   By `Fabien Maussion <https://github.com/fmaussion>`_.
+- The ``process_cesm_data`` function has been split into two functions, to make
+  it easier to run oggm with the climate of other GCM's: ``process_cesm_data``
+  reads the CESM files and handles the CESM specific file logic.
+  ``process_gcm_data`` is the general task able to handle all kind of data.
+  ``process_cesm_data`` can also be used as an example when you plan make a
+  function for running OGGM with another GCM (:issue:`469` & :pull:`582`).
+  `Anouk Vlug <https://github.com/anoukvlug>`_.
+- New ``process_dummy_cru_file`` task to run OGGM with randomized CRU data
+  (:pull:`603`).
+  By `Fabien Maussion <https://github.com/fmaussion>`_.
+- Colormaps in some graphics are replaced with Hue-Chroma-Luminance (HCL) based
+  improvements when python-colorspace is (optionally) installed (:pull:`587`).
+  By `Sadie Bartholomew <https://github.com/sadielbartholomew>`_.
+- Added a workflow ``merge_glacier_tasks`` which merges tributary/surrounding
+  glaciers to a main glacier, allowing mass exchange between them. This is
+  helpfull/neccessary/intended for growing glacier experiments (e.g.
+  paleoglaciology) (:pull:`624`).
+  By `Matthias Dusch <https://github.com/matthiasdusch>`_.
+- New ``oggm_prepro`` command line tool to run the OGGM preprocessing tasks
+  and compress the directories (:pull:`648`).
+  By `Fabien Maussion <https://github.com/fmaussion>`_.
+- `init_glacier_regions` task now accepts RGI Ids strongs as input instead of
+  only Geodataframes previously (:pull:`656`).
+  By `Fabien Maussion <https://github.com/fmaussion>`_.
+- The ``entity_task`` decorator now accepts a fallback-function which will be
+  executed if a task fails and `cfg.PARAMS['continue_on_error'] = True`. So far
+  only one fallback function is implemented for ``climate.local_t_star`
+  (:pull:`663`).
+  By `Matthias Dusch <https://github.com/matthiasdusch>`_.
+
 
 
 Bug fixes
