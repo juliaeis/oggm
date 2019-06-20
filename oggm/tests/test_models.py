@@ -85,7 +85,7 @@ class TestInitFlowline(unittest.TestCase):
 
         ofl = gdir.read_pickle('inversion_flowlines')[-1]
 
-        self.assertTrue(gdir.rgi_date.year == 2003)
+        self.assertTrue(gdir.rgi_date == 2003)
         self.assertTrue(len(fls) == 3)
 
         vol = 0.
@@ -1709,7 +1709,7 @@ class TestIdealisedInversion(unittest.TestCase):
             ax.legend(loc=3)
         plt.show()
 
-    def test_inversion_vertical(self):
+    def test_inversion_rectangular(self):
 
         fls = dummy_constant_bed(map_dx=self.gdir.grid.dx, widths=10)
         mb = LinearMassBalance(2600.)
@@ -1729,10 +1729,48 @@ class TestIdealisedInversion(unittest.TestCase):
         self.gdir.write_pickle(copy.deepcopy(fls), 'inversion_flowlines')
 
         climate.apparent_mb_from_linear_mb(self.gdir)
-        inversion.prepare_for_inversion(self.gdir)
+        inversion.prepare_for_inversion(self.gdir, add_debug_var=True)
         v, _ = inversion.mass_conservation_inversion(self.gdir)
 
         assert_allclose(v, model.volume_m3, rtol=0.01)
+
+        # Equations
+        mb_on_z = mb.get_annual_mb(fl.surface_h[pg])
+        flux = np.cumsum(fl.widths_m[pg] * fl.dx_meter * mb_on_z)
+
+        inv_out = self.gdir.read_pickle('inversion_input')
+        inv_flux = inv_out[0]['flux']
+
+        slope = - np.gradient(fl.surface_h[pg], fl.dx_meter)
+
+        est_h = inversion.sia_thickness(slope, fl.widths_m[pg], flux)
+        mod_h = fl.thick[pg]
+
+        # Test in the middle where slope is not too important
+        assert_allclose(est_h[25:75], mod_h[25:75], rtol=0.01)
+
+        # OGGM internal flux
+        est_h_ofl = inversion.sia_thickness(slope, fl.widths_m[pg], inv_flux)
+
+        # Test in the middle where slope is not too important
+        assert_allclose(est_h[25:75], mod_h[25:75], rtol=0.01)
+
+        # OK so what's happening here is following: the flux computed in
+        # OGGM intern is less good than the real one with the real MB,
+        # because of the zero-flux assumption at the last grid-point
+        # so this RMSD is smaller:
+        assert (utils.rmsd(est_h[25:95], mod_h[25:95]) <
+                utils.rmsd(est_h_ofl[25:95], mod_h[25:95]))
+
+        # And with our current inversion?
+        inv_out = self.gdir.read_pickle('inversion_output')
+        our_h = inv_out[0]['thick']
+        assert_allclose(est_h[25:75], our_h[25:75], rtol=0.01)
+
+        # Check with scalars
+        assert inversion.sia_thickness(slope[-5], fl.widths_m[pg][-5],
+                                       inv_flux[-5]) > 1
+
         if do_plot:  # pragma: no cover
             self.simple_plot(model)
 
@@ -1756,7 +1794,7 @@ class TestIdealisedInversion(unittest.TestCase):
         self.gdir.write_pickle(copy.deepcopy(fls), 'inversion_flowlines')
 
         climate.apparent_mb_from_linear_mb(self.gdir)
-        inversion.prepare_for_inversion(self.gdir)
+        inversion.prepare_for_inversion(self.gdir, add_debug_var=True)
         v, _ = inversion.mass_conservation_inversion(self.gdir)
         assert_allclose(v, model.volume_m3, rtol=0.01)
 
@@ -1764,6 +1802,40 @@ class TestIdealisedInversion(unittest.TestCase):
         bed_shape_gl = 4 * inv['thick'] / (flo.widths * self.gdir.grid.dx) ** 2
         bed_shape_ref = (4 * fl.thick[pg] /
                          (flo.widths * self.gdir.grid.dx) ** 2)
+
+        # Equations
+        mb_on_z = mb.get_annual_mb(fl.surface_h[pg])
+        flux = np.cumsum(fl.widths_m[pg] * fl.dx_meter * mb_on_z)
+
+        inv_out = self.gdir.read_pickle('inversion_input')
+        inv_flux = inv_out[0]['flux']
+
+        slope = - np.gradient(fl.surface_h[pg], fl.dx_meter)
+
+        est_h = inversion.sia_thickness(slope, fl.widths_m[pg], flux,
+                                        shape='parabolic')
+        mod_h = fl.thick[pg]
+
+        # Test in the middle where slope is not too important
+        assert_allclose(est_h[25:75], mod_h[25:75], rtol=0.01)
+
+        # OGGM internal flux
+        est_h_ofl = inversion.sia_thickness(slope, fl.widths_m[pg], inv_flux)
+
+        # Test in the middle where slope is not too important
+        assert_allclose(est_h[25:75], mod_h[25:75], rtol=0.01)
+
+        # OK so what's happening here is following: the flux computed in
+        # OGGM intern is less good than the real one with the real MB,
+        # because of the zero-flux assumption at the last grid-point
+        # so this RMSD is smaller:
+        assert (utils.rmsd(est_h[25:95], mod_h[25:95]) <
+                utils.rmsd(est_h_ofl[25:95], mod_h[25:95]))
+
+        # And with our current inversion?
+        inv_out = self.gdir.read_pickle('inversion_output')
+        our_h = inv_out[0]['thick']
+        assert_allclose(est_h[25:75], our_h[25:75], rtol=0.01)
 
         # assert utils.rmsd(fl.bed_shape[pg], bed_shape_gl) < 0.001
         if do_plot:  # pragma: no cover
@@ -1817,6 +1889,20 @@ class TestIdealisedInversion(unittest.TestCase):
         cfg.PARAMS['use_shape_factor_for_fluxbasedmodel'] = old_model_sf
         cfg.PARAMS['use_shape_factor_for_inversion'] = old_inversion_sf
 
+        # Equations
+        mb_on_z = mb.get_annual_mb(fl.surface_h[pg])
+        flux = np.cumsum(fl.widths_m[pg] * fl.dx_meter * mb_on_z)
+
+        slope = - np.gradient(fl.surface_h[pg], fl.dx_meter)
+
+        est_h = inversion.sia_thickness(slope, fl.widths_m[pg], flux,
+                                        shape='parabolic',
+                                        shape_factor='Adhikari')
+        mod_h = fl.thick[pg]
+
+        # Test in the middle where slope is not too important
+        assert_allclose(est_h[25:75], mod_h[25:75], rtol=0.01)
+
     def test_inversion_parabolic_sf_huss(self):
         old_model_sf = cfg.PARAMS['use_shape_factor_for_fluxbasedmodel']
         old_inversion_sf = cfg.PARAMS['use_shape_factor_for_inversion']
@@ -1862,6 +1948,20 @@ class TestIdealisedInversion(unittest.TestCase):
 
         cfg.PARAMS['use_shape_factor_for_fluxbasedmodel'] = old_model_sf
         cfg.PARAMS['use_shape_factor_for_inversion'] = old_inversion_sf
+
+        # Equations
+        mb_on_z = mb.get_annual_mb(fl.surface_h[pg])
+        flux = np.cumsum(fl.widths_m[pg] * fl.dx_meter * mb_on_z)
+
+        slope = - np.gradient(fl.surface_h[pg], fl.dx_meter)
+
+        est_h = inversion.sia_thickness(slope, fl.widths_m[pg], flux,
+                                        shape='parabolic',
+                                        shape_factor='Huss')
+        mod_h = fl.thick[pg]
+
+        # Test in the middle where slope is not too important
+        assert_allclose(est_h[25:75], mod_h[25:75], rtol=0.01)
 
     @pytest.mark.slow
     def test_inversion_mixed(self):
@@ -2522,6 +2622,68 @@ class TestHEF(unittest.TestCase):
                     plt.show()
 
         self.gdir.hemisphere = 'nh'
+
+    def test_start_from_spinup(self):
+
+        init_present_time_glacier(self.gdir)
+
+        fls = self.gdir.read_pickle('model_flowlines')
+        vol = 0
+        area = 0
+        for fl in fls:
+            vol += fl.volume_km3
+            area += fl.area_km2
+        assert self.gdir.rgi_date == 2003
+
+        # Make a dummy run for 0 years
+        run_from_climate_data(self.gdir, ye=2003, output_filesuffix='_1')
+
+        fp = self.gdir.get_filepath('model_run', filesuffix='_1')
+        with FileModel(fp) as fmod:
+            fmod.run_until(fmod.last_yr)
+            np.testing.assert_allclose(fmod.area_km2, area)
+            np.testing.assert_allclose(fmod.volume_km3, vol)
+
+        # Again
+        run_from_climate_data(self.gdir, ye=2003, init_model_filesuffix='_1',
+                              output_filesuffix='_2')
+        fp = self.gdir.get_filepath('model_run', filesuffix='_2')
+        with FileModel(fp) as fmod:
+            fmod.run_until(fmod.last_yr)
+            np.testing.assert_allclose(fmod.area_km2, area)
+            np.testing.assert_allclose(fmod.volume_km3, vol)
+
+    def test_start_from_spinup_min_ys(self):
+
+        init_present_time_glacier(self.gdir)
+
+        fls = self.gdir.read_pickle('model_flowlines')
+        vol = 0
+        area = 0
+        for fl in fls:
+            vol += fl.volume_km3
+            area += fl.area_km2
+        assert self.gdir.rgi_date == 2003
+
+        # Make a dummy run for 0 years
+        run_from_climate_data(self.gdir, ye=2002, min_ys=2002,
+                              output_filesuffix='_1')
+
+        fp = self.gdir.get_filepath('model_run', filesuffix='_1')
+        with FileModel(fp) as fmod:
+            fmod.run_until(fmod.last_yr)
+            np.testing.assert_allclose(fmod.area_km2, area)
+            np.testing.assert_allclose(fmod.volume_km3, vol)
+
+        # Again
+        run_from_climate_data(self.gdir, ys=2002, ye=2003,
+                              init_model_filesuffix='_1',
+                              output_filesuffix='_2')
+        fp = self.gdir.get_filepath('model_run', filesuffix='_2')
+        with FileModel(fp) as fmod:
+            fmod.run_until(fmod.last_yr)
+            np.testing.assert_allclose(fmod.area_km2, area, rtol=0.05)
+            np.testing.assert_allclose(fmod.volume_km3, vol, rtol=0.05)
 
     @pytest.mark.slow
     def test_cesm(self):

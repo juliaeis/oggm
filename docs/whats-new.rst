@@ -4,8 +4,101 @@
 Version history
 ===============
 
-v1.X (unreleased)
+v1.2.0 (unreleased)
+-------------------
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+- ``run_until`` now makes sure that the years (months) are not crossed by
+  the adaptive time-stepping scheme (:issue:`710`). ``run_until`` and
+  ``run_until_and_store`` should now be consistent. The change is unlikely to
+  affect the majority of users (which used ``run_until_and_store``), but
+  the results or ``run_until`` can be affected (:pull:`726`).
+  By `Matthias Dusch <https://github.com/matthiasdusch>`_.
+- ``find_inversion_calving`` has been renamed to
+  ``find_inversion_calving_loop`` and will probably be deprecated soon
+  (:pull:`794`).
+  By `Fabien Maussion <https://github.com/fmaussion>`_.
+
+Enhancements
+~~~~~~~~~~~~
+
+- Added new ``gridded_attributes`` and ``gridded_mb_attributes`` tasks to
+  add raster glacier attributes such as slope, aspect, mass-balance...
+  to the glacier directory (:pull:`725`). This can be useful for statistical
+  modelling of glacier thickness.
+  By `Matteo Castellani <https://github.com/MatCast>`_.
+- Added support for a new DEM dataset: Mapzen, found on Amazon cloud
+  (:issue:`748`, :pull:`759`). Also added some utility functions to handle
+  DEMs, to be improved further in the near future.
+  By `Fabien Maussion <https://github.com/fmaussion>`_.
+- Added support for a new DEM dataset: REMA (:pull:`759`).
+  By `Fabien Maussion <https://github.com/fmaussion>`_.
+- Added an option to pre-process all DEMs at once (:pull:`771`).
+  By `Fabien Maussion <https://github.com/fmaussion>`_.
+- Added support for another evolution model: the volume-area-scaling based
+  model of Marzeion et al., 2012 (:pull:`662`). This is a major enhancement
+  to the code base as it increases the number of choices available to users
+  and demonstrates the modularity of the model.
+  By `Moritz Oberrauch <https://github.com/oberrauch>`_.
+- Changed the way the calving flux is computed during the ice thickness
+  inversion. This no longer relies on an iteration over mu*, but solves
+  for `h` instead. The new function is likely to replace the "old"
+  calving loop(:pull:`794`).
+  By `Fabien Maussion <https://github.com/fmaussion>`_.
+
+
+Bug fixes
+~~~~~~~~~
+
+- Preprocessed directories at the level 3 now also have the glacier flowlines
+  ready for the run (:issue:`736`, :pull:`771`).
+  By `Fabien Maussion <https://github.com/fmaussion>`_.
+
+v1.1.1 (24.04.2019)
+-------------------
+
+Minor release of the OGGM model, with several bugfixes and some improvements.
+
+We don't expect any change in the model results due to this release.
+
+Enhancements
+~~~~~~~~~~~~
+
+- Adapted ``graphics.plot_domain``, ``graphics.plot_centerlines`` and
+  ``graphics_plot_modeloutput_map`` to work with merged glaciers (:pull:`726`).
+  By `Matthias Dusch <https://github.com/matthiasdusch>`_.
+- Added (and updated) an official task to find the calving flux based on the
+  mass-conservation inversion (`inversion.find_inversion_calving`). This
+  is still in experimentation phase! (:pull:`720`).
+  By `Beatriz Recinos <https://github.com/bearecinos>`_.
+- Added a mechanism to add custom MB data to OGGM (:issue:`724`).
+  By `Fabien Maussion <https://github.com/fmaussion>`_.
+- The ALOS Global Digital Surface Model "ALOS World 3D - 30m" DEM from JAXA can
+  now be used as alternative DEM within OGGM.
+  `See our tutorial <http://edu.oggm.org/en/latest/oggm_tuto.html>`_ on how to
+  set an alternative DEM (:pull:`734`).
+  By `Matthias Dusch <https://github.com/matthiasdusch>`_.
+- Switch to setuptools-scm as a version control system (:issue:`727`).
+  By `Timo Rothenpieler <https://github.com/TimoRoth>`_.
+
+Bug fixes
+~~~~~~~~~
+
+- Fixed several problems with the file download verification algorithm.
+  By `Timo Rothenpieler <https://github.com/TimoRoth>`_.
+- Fixed a timing problem in the benchmark command line tool (:pull:`717`).
+  By `Fabien Maussion <https://github.com/fmaussion>`_.
+
+
+v1.1 (28.02.2019)
 -----------------
+
+This is a major new release of the OGGM model, with substantial improvements
+to version 1. We recommend to use this version from now on. It coincides
+with the publication of our publication in
+`Geoscientific Model Development <https://www.geosci-model-dev.net/12/909/2019/>`_.
 
 New contributors to the project:
 
@@ -175,10 +268,11 @@ Enhancements
   By `Fabien Maussion <https://github.com/fmaussion>`_.
 - The ``entity_task`` decorator now accepts a fallback-function which will be
   executed if a task fails and `cfg.PARAMS['continue_on_error'] = True`. So far
-  only one fallback function is implemented for ``climate.local_t_star`
+  only one fallback function is implemented for `climate.local_t_star`
   (:pull:`663`).
   By `Matthias Dusch <https://github.com/matthiasdusch>`_.
-
+- New `process_gcm_data` task to handle CMIP5 files.
+  By `Nicolas Champollion <https://github.com/nchampollion>`_.
 
 
 Bug fixes

@@ -23,7 +23,8 @@ import oggm.cfg as cfg
 from oggm import utils
 from oggm.exceptions import MassBalanceCalibrationError
 from oggm.utils import get_demo_file, tuple2int
-from oggm.tests.funcs import get_test_dir, patch_url_retrieve_github
+from oggm.tests.funcs import (get_test_dir, patch_url_retrieve_github,
+                              init_columbia)
 from oggm import workflow
 
 pytestmark = pytest.mark.test_env("prepro")
@@ -209,7 +210,7 @@ class TestGIS(unittest.TestCase):
         gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
         gis.define_glacier_region(gdir, entity=entity)
         gis.glacier_masks(gdir)
-        gis.interpolation_masks(gdir)
+        gis.gridded_attributes(gdir)
 
         with utils.ncDataset(gdir.get_filepath('gridded_data')) as nc:
             glacier_mask = nc.variables['glacier_mask'][:]
@@ -323,6 +324,12 @@ class TestGIS(unittest.TestCase):
         gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
         gis.define_glacier_region(gdir, entity=entity)
         self.assertTrue(gdir.has_file('intersects'))
+
+    def test_dem_source_text(self):
+
+        for s in ['TANDEM', 'AW3D30', 'MAPZEN', 'DEM3', 'ASTER', 'SRTM',
+                  'RAMP', 'GIMP', 'ARCTICDEM', 'DEM3', 'REMA']:
+            assert s in gis.DEM_SOURCE_INFO.keys()
 
 
 class TestCenterlines(unittest.TestCase):
@@ -525,7 +532,7 @@ class TestCenterlines(unittest.TestCase):
         entity['Area'] = entity['AREA']
         entity['CenLat'] = entity['CENLAT']
         entity['CenLon'] = entity['CENLON']
-        entity.BgnDate = 0
+        entity.BgnDate = '-999'
         entity.Name = 'Baltoro'
         entity.GlacType = '0000'
         entity.Status = '0'
@@ -538,6 +545,8 @@ class TestCenterlines(unittest.TestCase):
 
         my_mask = np.zeros((gdir.grid.ny, gdir.grid.nx), dtype=np.uint8)
         cls = gdir.read_pickle('centerlines')
+
+        assert gdir.rgi_date == 2009
 
         sub = centerlines.line_inflows(cls[-1])
         self.assertEqual(set(cls), set(sub))
@@ -1491,6 +1500,50 @@ class TestClimate(unittest.TestCase):
         cfg.PARAMS['prcp_scaling_factor'] = _prcp_sf
         cfg.PARAMS['continue_on_error'] = False
 
+    def test_ref_mb_glaciers(self):
+
+        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
+        entity = gpd.read_file(hef_file).iloc[0]
+        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
+
+        rids = utils.get_ref_mb_glaciers_candidates()
+        assert len(rids) > 200
+
+        rids = utils.get_ref_mb_glaciers_candidates(gdir.rgi_version)
+        assert len(rids) > 200
+
+        assert len(cfg.DATA) >= 2
+
+        with pytest.raises(RuntimeError):
+            utils.get_ref_mb_glaciers([gdir])
+
+        climate.process_custom_climate_data(gdir)
+        ref_gd = utils.get_ref_mb_glaciers([gdir])
+        assert len(ref_gd) == 1
+
+    def test_fake_ref_mb_glacier(self):
+
+        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
+        entity = gpd.read_file(hef_file).iloc[0]
+        gdir1 = oggm.GlacierDirectory(entity, base_dir=self.testdir)
+        climate.process_custom_climate_data(gdir1)
+        entity['RGIId'] = 'RGI50-11.99999'
+        gdir2 = oggm.GlacierDirectory(entity, base_dir=self.testdir)
+        climate.process_custom_climate_data(gdir2)
+
+        ref_gd = utils.get_ref_mb_glaciers([gdir2])
+        assert len(ref_gd) == 0
+
+        gdir2.set_ref_mb_data(gdir1.get_ref_mb_data())
+
+        ref_gd = utils.get_ref_mb_glaciers([gdir2])
+        assert len(ref_gd) == 0
+
+        cfg.DATA['RGI50_ref_ids'].append('RGI50-11.99999')
+
+        ref_gd = utils.get_ref_mb_glaciers([gdir2])
+        assert len(ref_gd) == 1
+
     def test_automated_workflow(self):
 
         cfg.PARAMS['run_mb_calibration'] = False
@@ -2184,119 +2237,154 @@ class TestCoxeCalvingInvert(unittest.TestCase):
             assert fl2.mu_star < fl1.mu_star
 
 
-class TestColumbiaCalvingLoop(unittest.TestCase):
+class TestColumbiaCalving(unittest.TestCase):
 
     def setUp(self):
-
-        # test directory
-        self.testdir = os.path.join(get_test_dir(), 'tmp_columbia')
-
-        # Init
-        cfg.initialize()
-        cfg.PATHS['working_dir'] = self.testdir
-        cfg.PARAMS['use_intersects'] = False
-        cfg.PATHS['dem_file'] = get_demo_file('dem_Columbia.tif')
-        cfg.PARAMS['border'] = 10
-
-    def tearDown(self):
-        self.rm_dir()
-
-    def rm_dir(self):
-        if os.path.exists(self.testdir):
-            shutil.rmtree(self.testdir)
+        self.gdir = init_columbia()
 
     @pytest.mark.slow
-    def test_calving_loop(self):
+    def test_find_calving(self):
 
-        entity = gpd.read_file(get_demo_file('01_rgi60_Columbia.shp')).iloc[0]
-        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
+        gdir = self.gdir
 
-        gis.define_glacier_region(gdir, entity=entity)
-        gis.glacier_masks(gdir)
-        centerlines.compute_centerlines(gdir)
-        centerlines.initialize_flowlines(gdir)
-        centerlines.compute_downstream_line(gdir)
-        centerlines.compute_downstream_bedshape(gdir)
-        centerlines.catchment_area(gdir)
-        centerlines.catchment_intersections(gdir)
-        centerlines.catchment_width_geom(gdir)
-        centerlines.catchment_width_correction(gdir)
-        climate.process_dummy_cru_file(gdir, seed=0)
+        # Test default k (it overshoots)
+        df = inversion.find_inversion_calving(gdir)
 
-        rho = cfg.PARAMS['ice_density']
-        i = 0
-        calving_flux = []
-        mu_star = []
-        ite = []
-        cfg.PARAMS['clip_mu_star'] = False
-        cfg.PARAMS['min_mu_star'] = 0  # default is now 1
-        while i < 12:
+        assert df['calving_flux'] > 2
+        assert df['calving_mu_star'] == 0
 
-            # Calculates a calving flux from model output
-            if i == 0:
-                # First call we set to zero (not very necessary,
-                # this first loop could be removed)
-                f_calving = 0
-            elif i == 1:
-                # Second call we set a very small positive calving
-                f_calving = utils.calving_flux_from_depth(gdir, water_depth=1)
-            elif cfg.PARAMS['clip_mu_star']:
-                # If we have to clip mu the calving becomes the real flux
-                fl = gdir.read_pickle('inversion_flowlines')[-1]
-                f_calving = fl.flux[-1] * (gdir.grid.dx ** 2) * 1e-9 / rho
-            else:
-                # Otherwise it is parameterized
-                f_calving = utils.calving_flux_from_depth(gdir)
-
-            # Give it back to the inversion and recompute
-            gdir.inversion_calving_rate = f_calving
-
-            # At this step we might raise a MassBalanceCalibrationError
-            mu_is_zero = False
-            try:
-                climate.local_t_star(gdir)
-                df = gdir.read_json('local_mustar')
-            except MassBalanceCalibrationError as e:
-                assert 'mu* out of specified bounds' in str(e)
-                # When this happens we clip mu* to zero and store the
-                # bad value (just for plotting)
-                cfg.PARAMS['clip_mu_star'] = True
-                df = gdir.read_json('local_mustar')
-                df['mu_star_glacierwide'] = float(str(e).split(':')[-1])
-                climate.local_t_star(gdir)
-
-            climate.mu_star_calibration(gdir)
-            inversion.prepare_for_inversion(gdir, add_debug_var=True)
-            v_inv, _ = inversion.mass_conservation_inversion(gdir)
-
-            # Store the data
-            calving_flux = np.append(calving_flux, f_calving)
-            mu_star = np.append(mu_star, df['mu_star_glacierwide'])
-            ite = np.append(ite, i)
-
-            # Do we have to do another_loop?
-            if i > 0:
-                avg_one = np.mean(calving_flux[-4:])
-                avg_two = np.mean(calving_flux[-5:-1])
-                difference = abs(avg_two - avg_one)
-                conv = (difference < 0.05 * avg_two or
-                        calving_flux[-1] == 0 or
-                        calving_flux[-1] == calving_flux[-2])
-                if mu_is_zero or conv:
-                    break
-            i += 1
-
-        assert i < 8
-        assert calving_flux[-1] < np.max(calving_flux)
-        assert calving_flux[-1] > 2
-        assert mu_star[-1] == 0
-
+        # Test that new MB equal flux
         mbmod = massbalance.MultipleFlowlineMassBalance
         mb = mbmod(gdir, use_inversion_flowlines=True,
                    mb_model_class=massbalance.ConstantMassBalance,
                    bias=0)
+
+        rho = cfg.PARAMS['ice_density']
         flux_mb = (mb.get_specific_mb() * gdir.rgi_area_m2) * 1e-9 / rho
-        np.testing.assert_allclose(flux_mb, calving_flux[-1], atol=0.001)
+        np.testing.assert_allclose(flux_mb, df['calving_flux'],
+                                   atol=0.001)
+
+        # Test with smaller k (it doesn't overshoot)
+        default_calving = cfg.PARAMS['k_calving']
+        cfg.PARAMS['k_calving'] = 0.2
+        df = inversion.find_inversion_calving(gdir)
+
+        assert df['calving_flux'] > 0.5
+        assert df['calving_flux'] < 1
+        assert df['calving_mu_star'] > 0
+
+        # Test with fixed water depth
+        water_depth = 275.282
+        cfg.PARAMS['k_calving'] = default_calving
+
+        # Test with fixed water depth (it still overshoot)
+        df = inversion.find_inversion_calving(gdir,
+                                              fixed_water_depth=water_depth)
+
+        assert df['calving_flux'] > 2
+        assert df['calving_mu_star'] == 0
+        assert df['calving_water_depth'] == water_depth
+
+        # Test with smaller k (it doesn't overshoot)
+        cfg.PARAMS['k_calving'] = 0.2
+        df = inversion.find_inversion_calving(gdir,
+                                              fixed_water_depth=water_depth)
+
+        assert df['calving_flux'] > 0.1
+        assert df['calving_flux'] < 1
+        assert df['calving_mu_star'] > 0
+        assert df['calving_water_depth'] == water_depth
+
+        # Test glacier stats
+        odf = utils.compile_glacier_statistics([gdir],
+                                               inversion_only=True).iloc[0]
+        np.testing.assert_allclose(odf.calving_flux, df['calving_flux'])
+        np.testing.assert_allclose(odf.calving_water_depth, water_depth)
+
+    @pytest.mark.slow
+    def test_find_calving_loop(self):
+
+        gdir = self.gdir
+
+        # Test default k (it overshoots)
+        df = inversion.find_inversion_calving_loop(gdir)
+
+        assert max(df.index) < 8
+        assert max(df.index) > 3
+        assert df.calving_flux.iloc[-1] < np.max(df.calving_flux)
+        assert df.calving_flux.iloc[-1] > 2
+        assert df.mu_star.iloc[-1] == 0
+
+        # Test that new MB equal flux
+        mbmod = massbalance.MultipleFlowlineMassBalance
+        mb = mbmod(gdir, use_inversion_flowlines=True,
+                   mb_model_class=massbalance.ConstantMassBalance,
+                   bias=0)
+
+        rho = cfg.PARAMS['ice_density']
+        flux_mb = (mb.get_specific_mb() * gdir.rgi_area_m2) * 1e-9 / rho
+        np.testing.assert_allclose(flux_mb, df.calving_flux.iloc[-1],
+                                   atol=0.001)
+
+        # Test with smaller k (it doesn't overshoot)
+        default_calving = cfg.PARAMS['k_calving']
+        cfg.PARAMS['k_calving'] = 0.2
+        df = inversion.find_inversion_calving_loop(gdir)
+
+        assert max(df.index) < 14
+        assert max(df.index) > 8
+        assert df.calving_flux.iloc[-1] == np.max(df.calving_flux)
+        assert df.calving_flux.iloc[-1] > 0.5
+        assert df.calving_flux.iloc[-1] < 1
+        assert df.mu_star.iloc[-1] > 0
+
+        # Test with smaller k and large starting water depth
+        cfg.PARAMS['k_calving'] = 0.2
+        df = inversion.find_inversion_calving_loop(gdir,
+                                                   initial_water_depth=1200)
+
+        assert max(df.index) < 14
+        assert max(df.index) > 6
+        assert df.calving_flux.iloc[-1] < np.max(df.calving_flux)
+        assert df.calving_flux.iloc[-1] > 0.5
+        assert df.calving_flux.iloc[-1] < 1
+        assert df.mu_star.iloc[-1] > 0
+
+        # Test with fixed water depth
+        wd = 275.282
+        cfg.PARAMS['k_calving'] = default_calving
+
+        # Test with fixed water depth (it still overshoots, quickly)
+        df = inversion.find_inversion_calving_loop(gdir,
+                                                   initial_water_depth=wd,
+                                                   fixed_water_depth=True)
+
+        assert max(df.index) < 10
+        assert df.calving_flux.iloc[-1] < np.max(df.calving_flux)
+        assert df.calving_flux.iloc[-1] > 2
+        assert df.mu_star.iloc[-1] == 0
+        assert df.water_depth.iloc[-1] == wd
+
+        # Test with smaller k (it doesn't overshoot)
+        cfg.PARAMS['k_calving'] = 0.2
+        df = inversion.find_inversion_calving_loop(gdir,
+                                                   initial_water_depth=wd,
+                                                   fixed_water_depth=True)
+
+        assert max(df.index) < 10
+        assert df.calving_flux.iloc[-1] == np.max(df.calving_flux)
+        assert df.calving_flux.iloc[-1] > 0.1
+        assert df.calving_flux.iloc[-1] < 1
+        assert df.mu_star.iloc[-1] > 0
+        assert df.water_depth.iloc[-1] == wd
+
+        # Test glacier stats
+        odf = utils.compile_glacier_statistics([gdir],
+                                               inversion_only=True).iloc[0]
+        assert odf.calving_n_iterations < 10
+        np.testing.assert_allclose(odf.calving_flux, np.max(df.calving_flux))
+        np.testing.assert_allclose(odf.calving_front_water_depth,
+                                   df.water_depth.iloc[-1])
 
 
 class TestGrindelInvert(unittest.TestCase):
@@ -2546,6 +2634,133 @@ class TestGCMClimate(unittest.TestCase):
             np.testing.assert_allclose(scesm1.temp, scesm2.temp, atol=1)
             # N more than 30%? (silly test)
             np.testing.assert_allclose(scesm1.prcp, scesm2.prcp, rtol=0.3)
+
+    def test_process_cmip5(self):
+
+        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
+        entity = gpd.read_file(hef_file).iloc[0]
+
+        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
+        gis.define_glacier_region(gdir, entity=entity)
+        climate.process_cru_data(gdir)
+
+        ci = gdir.read_pickle('climate_info')
+        self.assertEqual(ci['baseline_hydro_yr_0'], 1902)
+        self.assertEqual(ci['baseline_hydro_yr_1'], 2014)
+
+        f = get_demo_file('tas_mon_CCSM4_rcp26_r1i1p1_g025.nc')
+        cfg.PATHS['cmip5_temp_file'] = f
+        f = get_demo_file('pr_mon_CCSM4_rcp26_r1i1p1_g025.nc')
+        cfg.PATHS['cmip5_precip_file'] = f
+        gcm_climate.process_cmip5_data(gdir, filesuffix='_CCSM4')
+
+        fh = gdir.get_filepath('climate_monthly')
+        fcmip = gdir.get_filepath('gcm_data', filesuffix='_CCSM4')
+        with xr.open_dataset(fh) as cru, xr.open_dataset(fcmip) as cmip:
+
+            # Let's do some basic checks
+            scru = cru.sel(time=slice('1961', '1990'))
+            scesm = cmip.load().isel(time=((cmip['time.year'] >= 1961) &
+                                           (cmip['time.year'] <= 1990)))
+            # Climate during the chosen period should be the same
+            np.testing.assert_allclose(scru.temp.mean(),
+                                       scesm.temp.mean(),
+                                       rtol=1e-3)
+            np.testing.assert_allclose(scru.prcp.mean(),
+                                       scesm.prcp.mean(),
+                                       rtol=1e-3)
+
+            # Here no std dev!
+            _scru = scru.groupby('time.month').std(dim='time')
+            _scesm = scesm.groupby('time.month').std(dim='time')
+            assert not np.allclose(_scru.temp, _scesm.temp, rtol=1e-2)
+
+            # And also the annual cycle
+            scru = scru.groupby('time.month').mean(dim='time')
+            scesm = scesm.groupby('time.month').mean(dim='time')
+            np.testing.assert_allclose(scru.temp, scesm.temp, rtol=1e-3)
+            np.testing.assert_allclose(scru.prcp, scesm.prcp, rtol=1e-3)
+
+            # How did the annual cycle change with time?
+            scmip1 = cmip.isel(time=((cmip['time.year'] >= 1961) &
+                                     (cmip['time.year'] <= 1990)))
+            scmip2 = cmip.isel(time=((cmip['time.year'] >= 2061) &
+                                     (cmip['time.year'] <= 2090)))
+            scmip1 = scmip1.groupby('time.month').mean(dim='time')
+            scmip2 = scmip2.groupby('time.month').mean(dim='time')
+            # It has warmed
+            assert scmip1.temp.mean() < (scmip2.temp.mean() - 1)
+            # N more than 30%? (silly test)
+            np.testing.assert_allclose(scmip1.prcp, scmip2.prcp, rtol=0.3)
+
+    def test_process_cmip5_scale(self):
+
+        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
+        entity = gpd.read_file(hef_file).iloc[0]
+
+        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
+        gis.define_glacier_region(gdir, entity=entity)
+        climate.process_cru_data(gdir)
+
+        ci = gdir.read_pickle('climate_info')
+        self.assertEqual(ci['baseline_hydro_yr_0'], 1902)
+        self.assertEqual(ci['baseline_hydro_yr_1'], 2014)
+
+        f = get_demo_file('tas_mon_CCSM4_rcp26_r1i1p1_g025.nc')
+        cfg.PATHS['cmip5_temp_file'] = f
+        f = get_demo_file('pr_mon_CCSM4_rcp26_r1i1p1_g025.nc')
+        cfg.PATHS['cmip5_precip_file'] = f
+        gcm_climate.process_cmip5_data(gdir, filesuffix='_CCSM4_ns')
+        gcm_climate.process_cmip5_data(gdir, filesuffix='_CCSM4',
+                                       scale_stddev=True)
+
+        fh = gdir.get_filepath('climate_monthly')
+        fcmip = gdir.get_filepath('gcm_data', filesuffix='_CCSM4')
+        with xr.open_dataset(fh) as cru, xr.open_dataset(fcmip) as cmip:
+
+            # Let's do some basic checks
+            scru = cru.sel(time=slice('1961', '1990'))
+            scesm = cmip.load().isel(time=((cmip['time.year'] >= 1961) &
+                                           (cmip['time.year'] <= 1990)))
+            # Climate during the chosen period should be the same
+            np.testing.assert_allclose(scru.temp.mean(),
+                                       scesm.temp.mean(),
+                                       rtol=1e-3)
+            np.testing.assert_allclose(scru.prcp.mean(),
+                                       scesm.prcp.mean(),
+                                       rtol=1e-3)
+
+            # And also the annual cycle
+            _scru = scru.groupby('time.month').mean(dim='time')
+            _scesm = scesm.groupby('time.month').mean(dim='time')
+            np.testing.assert_allclose(_scru.temp, _scesm.temp, rtol=1e-3)
+            np.testing.assert_allclose(_scru.prcp, _scesm.prcp, rtol=1e-3)
+
+            # Here also std dev!
+            _scru = scru.groupby('time.month').std(dim='time')
+            _scesm = scesm.groupby('time.month').std(dim='time')
+            np.testing.assert_allclose(_scru.temp, _scesm.temp, rtol=1e-2)
+
+            # How did the annual cycle change with time?
+            scmip1 = cmip.isel(time=((cmip['time.year'] >= 1961) &
+                                     (cmip['time.year'] <= 1990)))
+            scmip2 = cmip.isel(time=((cmip['time.year'] >= 2061) &
+                                     (cmip['time.year'] <= 2090)))
+            scmip1 = scmip1.groupby('time.month').mean(dim='time')
+            scmip2 = scmip2.groupby('time.month').mean(dim='time')
+            # It has warmed
+            assert scmip1.temp.mean() < (scmip2.temp.mean() - 1)
+            # N more than 30%? (silly test)
+            np.testing.assert_allclose(scmip1.prcp, scmip2.prcp, rtol=0.3)
+
+        # Check that the two variabilies still correlate a lot
+        f1 = gdir.get_filepath('gcm_data', filesuffix='_CCSM4_ns')
+        f2 = gdir.get_filepath('gcm_data', filesuffix='_CCSM4')
+        with xr.open_dataset(f1) as ds1, xr.open_dataset(f2) as ds2:
+            n = 30*12+1
+            ss1 = ds1.temp.rolling(time=n, min_periods=1, center=True).std()
+            ss2 = ds2.temp.rolling(time=n, min_periods=1, center=True).std()
+            assert utils.corrcoef(ss1, ss2) > 0.9
 
     def test_compile_climate_input(self):
 

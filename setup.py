@@ -3,7 +3,6 @@
    Adapted from the Python Packaging Authority template."""
 
 from setuptools import setup, find_packages  # Always prefer setuptools
-import versioneer
 
 
 DISTNAME = 'oggm'
@@ -20,9 +19,9 @@ CLASSIFIERS = [
         'License :: OSI Approved :: GNU General Public License ' +
         'v3 or later (GPLv3+)',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.4',
         'Programming Language :: Python :: 3.5',
         'Programming Language :: Python :: 3.6',
+        'Programming Language :: Python :: 3.7',
     ]
 
 DESCRIPTION = 'Open Global Glacier Model'
@@ -61,7 +60,6 @@ req_packages = ['numpy',
                 'pytest',
                 'xarray',
                 'progressbar2',
-                'boto3',
                 'requests',
                 'salem']
 
@@ -69,10 +67,11 @@ req_packages = ['numpy',
 setup(
     # Project info
     name=DISTNAME,
-    version=versioneer.get_version(),
-    cmdclass=versioneer.get_cmdclass(),
     description=DESCRIPTION,
     long_description=LONG_DESCRIPTION,
+    # Version info
+    setup_requires=['setuptools_scm', 'setuptools_scm_git_archive'],
+    use_scm_version=True,
     # The project's main homepage.
     url=URL,
     # Author details
@@ -87,19 +86,19 @@ setup(
     python_requires='>=3.5',
     # Find packages automatically
     packages=find_packages(exclude=['docs']),
+    # Include package data
+    include_package_data=True,
     # Install dependencies
     install_requires=req_packages,
     # additional groups of dependencies here (e.g. development dependencies).
     extras_require={},
-    # data files that need to be installed
-    package_data={'oggm': ['params.cfg']},
-    # Old
-    data_files=[],
     # Executable scripts
     entry_points={
         'pytest11': ['pytest_oggm = oggm.pytest_plugin'],
         'console_scripts': [
             'oggm_prepro = oggm.cli.prepro_levels:main',
+            'oggm_benchmark = oggm.cli.benchmark:main',
+            'oggm_tdmdem90_login = oggm.cli.tdmdem90_login:main',
         ],
     },
 )

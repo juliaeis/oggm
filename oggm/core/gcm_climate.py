@@ -2,6 +2,7 @@
 # Built ins
 import logging
 from distutils.version import LooseVersion
+from datetime import datetime
 # External libs
 import numpy as np
 import netCDF4
@@ -17,8 +18,8 @@ log = logging.getLogger(__name__)
 
 @entity_task(log, writes=['gcm_data', 'climate_info'])
 def process_gcm_data(gdir, filesuffix='', prcp=None, temp=None,
-                     time_unit='days since 1801-01-01 00:00:00',
-                     calendar=None):
+                     year_range=('1961', '1990'), scale_stddev=False,
+                     time_unit=None, calendar=None):
     """ Applies the anomaly method to GCM climate data
 
     This function can be applied to any GCM data, if it is provided in a
@@ -47,9 +48,15 @@ def process_gcm_data(gdir, filesuffix='', prcp=None, temp=None,
         | lat float64
         | lon float64
         | time cftime object
+    year_range : tuple of str
+        the year range for which you want to compute the anomalies. Default
+        is `('1961', '1990')`
+    scale_stddev : bool
+        whether or not to scale the temperature standard deviation as well
     time_unit : str
         The unit conversion for NetCDF files. It must be adapted to the
-        length of the time series.
+        length of the time series. The default is to choose
+        it ourselves based on the starting year.
         For example: 'days since 0850-01-01 00:00:00'
     calendar : str
         If you use an exotic calendar (e.g. 'noleap')
@@ -70,28 +77,49 @@ def process_gcm_data(gdir, filesuffix='', prcp=None, temp=None,
     prcp = prcp[sm-1:sm-13].load()
     temp = temp[sm-1:sm-13].load()
 
+    # Get CRU to apply the anomaly to
+    fpath = gdir.get_filepath('climate_monthly')
+    ds_cru = xr.open_dataset(fpath)
+
+    # Add CRU clim
+    dscru = ds_cru.sel(time=slice(*year_range))
+
     # compute monthly anomalies
     # of temp
-    ts_tmp_avg = temp.sel(time=slice('1961', '1990'))
-    ts_tmp_avg = ts_tmp_avg.groupby('time.month').mean(dim='time')
+    if scale_stddev:
+        # This is a bit more arithmetic
+        ts_tmp_sel = temp.sel(time=slice(*year_range))
+        ts_tmp_std = ts_tmp_sel.groupby('time.month').std(dim='time')
+        std_fac = dscru.temp.groupby('time.month').std(dim='time') / ts_tmp_std
+        std_fac = std_fac.roll(month=13-sm)
+        std_fac = np.tile(std_fac.data, len(temp) // 12)
+        win_size = 12 * (int(year_range[1]) - int(year_range[0]) + 1) + 1
+
+        def roll_func(x, axis=None):
+            assert axis == 1
+            x = x[:, ::12]
+            n = len(x[0, :]) // 2
+            xm = np.nanmean(x, axis=axis)
+            return xm + (x[:, n] - xm) * std_fac
+
+        temp = temp.rolling(time=win_size, center=True,
+                            min_periods=1).reduce(roll_func)
+
+    ts_tmp_sel = temp.sel(time=slice(*year_range))
+    ts_tmp_avg = ts_tmp_sel.groupby('time.month').mean(dim='time')
     ts_tmp = temp.groupby('time.month') - ts_tmp_avg
     # of precip -- scaled anomalies
-    ts_pre_avg = prcp.sel(time=slice('1961', '1990'))
+    ts_pre_avg = prcp.sel(time=slice(*year_range))
     ts_pre_avg = ts_pre_avg.groupby('time.month').mean(dim='time')
     ts_pre_ano = prcp.groupby('time.month') - ts_pre_avg
     # scaled anomalies is the default. Standard anomalies above
     # are used later for where ts_pre_avg == 0
     ts_pre = prcp.groupby('time.month') / ts_pre_avg
 
-    # Get CRU to apply the anomaly to
-    fpath = gdir.get_filepath('climate_monthly')
-    ds_cru = xr.open_dataset(fpath)
-
-    # Add climate anomaly to CRU clim
-    dscru = ds_cru.sel(time=slice('1961', '1990'))
     # for temp
     loc_tmp = dscru.temp.groupby('time.month').mean()
     ts_tmp = ts_tmp.groupby('time.month') + loc_tmp
+
     # for prcp
     loc_pre = dscru.prcp.groupby('time.month').mean()
     # scaled anomalies
@@ -102,7 +130,7 @@ def process_gcm_data(gdir, filesuffix='', prcp=None, temp=None,
     ts_pre.values = np.where(np.isfinite(ts_pre.values),
                              ts_pre.values,
                              ts_pre_ano.values)
-    # The last step might create negative values (unlikely). Clip them
+    # The previous step might create negative values (unlikely). Clip them
     ts_pre.values = ts_pre.values.clip(0)
 
     assert np.all(np.isfinite(ts_pre.values))
@@ -122,8 +150,8 @@ def process_gcm_data(gdir, filesuffix='', prcp=None, temp=None,
 
 @entity_task(log, writes=['gcm_data', 'climate_info'])
 def process_cesm_data(gdir, filesuffix='', fpath_temp=None, fpath_precc=None,
-                      fpath_precl=None):
-    """Processes and writes GCM climate data for this glacier.
+                      fpath_precl=None, **kwargs):
+    """Processes and writes CESM climate data for this glacier.
 
     This function is made for interpolating the Community
     Earth System Model Last Millennium Ensemble (CESM-LME) climate simulations,
@@ -142,9 +170,10 @@ def process_cesm_data(gdir, filesuffix='', fpath_temp=None, fpath_precc=None,
         path to the precc file (default: cfg.PATHS['cesm_precc_file'])
     fpath_precl : str
         path to the precl file (default: cfg.PATHS['cesm_precl_file'])
+    **kwargs: any kwarg to be passed to ref:`process_gcm_data`
     """
 
-    # GCM temperature and precipitation data
+    # CESM temperature and precipitation data
     if fpath_temp is None:
         if not ('cesm_temp_file' in cfg.PATHS):
             raise ValueError("Need to set cfg.PATHS['cesm_temp_file']")
@@ -169,12 +198,12 @@ def process_cesm_data(gdir, filesuffix='', fpath_temp=None, fpath_precc=None,
     # Get the time right - i.e. from time bounds
     # Fix for https://github.com/pydata/xarray/issues/2565
     with utils.ncDataset(fpath_temp, mode='r') as nc:
-        time_units = nc.variables['time'].units
+        time_unit = nc.variables['time'].units
         calendar = nc.variables['time'].calendar
 
     try:
         # xarray v0.11
-        time = netCDF4.num2date(tempds.time_bnds[:, 0], time_units,
+        time = netCDF4.num2date(tempds.time_bnds[:, 0], time_unit,
                                 calendar=calendar)
     except TypeError:
         # xarray > v0.11
@@ -215,4 +244,84 @@ def process_cesm_data(gdir, filesuffix='', fpath_temp=None, fpath_precc=None,
     # - time_unit='days since 0850-01-01 00:00:00'
     # - calendar='noleap'
     process_gcm_data(gdir, filesuffix=filesuffix, prcp=prcp, temp=temp,
-                     time_unit=time_units, calendar=calendar)
+                     time_unit=time_unit, calendar=calendar, **kwargs)
+
+
+@entity_task(log, writes=['gcm_data', 'climate_info'])
+def process_cmip5_data(gdir, filesuffix='', fpath_temp=None,
+                       fpath_precip=None, **kwargs):
+    """Read, process and store the CMIP5 climate data data for this glacier.
+
+    It stores the data in a format that can be used by the OGGM mass balance
+    model and in the glacier directory.
+
+    Currently, this function is built for the CMIP5 projection simulation
+    (https://pcmdi.llnl.gov/mips/cmip5/) from Taylor et al. (2012).
+
+    Parameters
+    ----------
+    filesuffix : str
+        append a suffix to the filename (useful for ensemble experiments).
+    fpath_temp : str
+        path to the temp file (default: cfg.PATHS['cmip5_temp_file'])
+    fpath_precip : str
+        path to the precip file (default: cfg.PATHS['cmip5_precip_file'])
+    **kwargs: any kwarg to be passed to ref:`process_gcm_data`
+    """
+
+    # Get the path of GCM temperature & precipitation data
+    if fpath_temp is None:
+        if not ('cmip5_temp_file' in cfg.PATHS):
+            raise ValueError("Need to set cfg.PATHS['cmip5_temp_file']")
+        fpath_temp = cfg.PATHS['cmip5_temp_file']
+    if fpath_precip is None:
+        if not ('cmip5_precip_file' in cfg.PATHS):
+            raise ValueError("Need to set cfg.PATHS['cmip5_precip_file']")
+        fpath_precip = cfg.PATHS['cmip5_precip_file']
+
+    # Read the GCM files
+    tempds = xr.open_dataset(fpath_temp, decode_times=False)
+    precipds = xr.open_dataset(fpath_precip, decode_times=False)
+
+    with utils.ncDataset(fpath_temp, mode='r') as nc:
+        time_units = nc.variables['time'].units
+        calendar = nc.variables['time'].calendar
+        time = netCDF4.num2date(nc.variables['time'][:], time_units)
+
+    # Select for location
+    lon = gdir.cenlon
+    lat = gdir.cenlat
+
+    # Conversion of the longitude
+    if lon <= 0:
+        lon += 360
+
+    # Take the closest to the glacier
+    # Should we consider GCM interpolation?
+    temp = tempds.tas.sel(lat=lat, lon=lon, method='nearest')
+    precip = precipds.pr.sel(lat=lat, lon=lon, method='nearest')
+
+    # Time needs a set to start of month
+    time = [datetime(t.year, t.month, 1) for t in time]
+    temp['time'] = time
+    precip['time'] = time
+
+    temp.lon.values = temp.lon if temp.lon <= 180 else temp.lon - 360
+    precip.lon.values = precip.lon if precip.lon <= 180 else precip.lon - 360
+
+    # Convert kg m-2 s-1 to mm mth-1 => 1 kg m-2 = 1 mm !!!
+    if temp.time[0].dt.month != 1:
+        raise ValueError('We expect the files to start in January!')
+
+    ny, r = divmod(len(temp), 12)
+    assert r == 0
+    precip = precip * precip.time.dt.days_in_month * (60 * 60 * 24)
+
+    tempds.close()
+    precipds.close()
+
+    # Here:
+    # - time_unit='days since 1870-01-15 12:00:00'
+    # - calendar='standard'
+    process_gcm_data(gdir, filesuffix=filesuffix, prcp=precip, temp=temp,
+                     time_unit=time_units, calendar=calendar, **kwargs)

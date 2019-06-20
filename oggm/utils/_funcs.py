@@ -24,7 +24,7 @@ from oggm.cfg import SEC_IN_YEAR, SEC_IN_MONTH
 from oggm.utils._downloads import get_demo_file
 
 # Module logger
-logger = logging.getLogger('.'.join(__name__.split('.')[:-1]))
+log = logging.getLogger('.'.join(__name__.split('.')[:-1]))
 
 _RGI_METADATA = dict()
 
@@ -309,6 +309,14 @@ def rmsd(ref, data, axis=None):
     return np.sqrt(np.mean((np.asarray(ref) - data)**2, axis=axis))
 
 
+def rmsd_bc(ref, data):
+    """Root Mean Squared Deviation of bias-corrected time series.
+
+    I.e: rmsd(ref - mean(ref), data - mean(data)).
+    """
+    return rmsd(ref - np.mean(ref), data - np.mean(data))
+
+
 def rel_err(ref, data):
     """Relative error. Ref should be non-zero"""
     return (np.asarray(data) - ref) / ref
@@ -581,11 +589,9 @@ def filter_rgi_name(name):
 
 
 def shape_factor_huss(widths, heights, is_rectangular):
-    """Compute shape factor for inclusion of lateral drag
-    according to Huss and Farinotti (2012). The shape factor is only applied
-    for parabolic sections.
+    """Shape factor for lateral drag according to Huss and Farinotti (2012).
 
-    Not yet tested
+    The shape factor is only applied for parabolic sections.
 
     Parameters
     ----------
@@ -605,22 +611,19 @@ def shape_factor_huss(widths, heights, is_rectangular):
     is_rect = is_rectangular.astype(bool)
     shape_factors = np.ones(widths.shape)
 
-    # TODO: could check for division by 0, but at the moment
-    # this is covered by interpolation and clip, resulting in a factor of 1
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=RuntimeWarning)
         shape_factors[~is_rect] = (widths / (2 * heights + widths))[~is_rect]
+
     shape_factors[heights <= 0.] = 1.
 
     return shape_factors
 
 
 def shape_factor_adhikari(widths, heights, is_rectangular):
-    """Compute shape factor for inclusion of lateral drag according to
-    Adhikari (2012)
+    """Shape factor for lateral drag according to Adhikari (2012).
 
-    TODO: should we expand this here to also include
-    the factors suggested for sliding?
+    TODO: other factors could be used when sliding is included
 
     Parameters
     ----------
@@ -639,10 +642,9 @@ def shape_factor_adhikari(widths, heights, is_rectangular):
     # Ensure bool (for masking)
     is_rectangular = is_rectangular.astype(bool)
 
-    # TODO: could check for division by 0, but at the moment
-    # this is covered by interpolation and clip, resulting in a factor of 1
+    # Catch for division by 0 (corrected later)
     with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=RuntimeWarning)
+        warnings.filterwarnings('ignore', category=RuntimeWarning)
         zetas = widths / 2. / heights
 
     shape_factors = np.ones(widths.shape)
@@ -658,49 +660,3 @@ def shape_factor_adhikari(widths, heights, is_rectangular):
     shape_factors[np.isnan(shape_factors)] = 1.
 
     return shape_factors
-
-
-def calving_flux_from_depth(gdir, k=None, water_depth=None):
-    """Finds a calving flux from the calving front thickness.
-
-    Approach based on Huss and Hock, (2015) and Oerlemans and Nick (2005).
-    We take the initial output of the model and surface elevation data
-    to calculate the water depth of the calving front.
-
-    Parameters
-    ----------
-    gdir : GlacierDirectory
-    k : float
-        calving constant
-    water_depth :
-        the default is to compute the water_depth from ice thickness
-        at the terminus and altitude. Set this to force the water depth
-        to a certain value
-
-    Returns
-    -------
-    Calving flux in [km3 yr-1]
-    """
-
-    # Defaults
-    if k is None:
-        k = cfg.PARAMS['k_calving']
-
-    # Read inversion output
-    cl = gdir.read_pickle('inversion_output')[-1]
-    fl = gdir.read_pickle('inversion_flowlines')[-1]
-
-    # Altitude at the terminus and frontal width
-    t_altitude = np.clip(cl['hgt'][-1], 0, None)
-    width = fl.widths[-1] * gdir.grid.dx
-
-    # Calving formula
-    thick = cl['thick'][-1]
-    if water_depth is None:
-        water_depth = thick - t_altitude
-    else:
-        # Correct thickness with prescribed depth
-        thick = water_depth + t_altitude
-    out = k * thick * water_depth * width / 1e9
-
-    return np.clip(out, 0, None)

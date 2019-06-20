@@ -22,6 +22,7 @@ from oggm import __version__
 import oggm.cfg as cfg
 from oggm import utils
 from oggm import entity_task
+from oggm.exceptions import InvalidParamsError
 from oggm.core.massbalance import (MultipleFlowlineMassBalance,
                                    ConstantMassBalance,
                                    PastMassBalance,
@@ -398,7 +399,7 @@ class  FlowlineModel(object):
         mb_model : MassBalanceModel
             the MB model to use
         y0 : int
-            the starting year of the simultation
+            the starting year of the simulation
         glen_a : float
             glen's parameter A
         fs: float
@@ -422,7 +423,11 @@ class  FlowlineModel(object):
         self.is_tidewater = is_tidewater
 
         # Mass balance
-        self.mb_elev_feedback = mb_elev_feedback
+        self.mb_elev_feedback = mb_elev_feedback.lower()
+        if self.mb_elev_feedback in ['never', 'annual']:
+            self.mb_step = 'annual'
+        elif self.mb_elev_feedback in ['always', 'monthly']:
+            self.mb_step = 'monthly'
         self.mb_model = mb_model
 
         # Defaults
@@ -602,7 +607,27 @@ class  FlowlineModel(object):
         return np.isclose(self.fls[-1].thick[-1], 0)
 
     def step(self, dt):
-        """Advance one step."""
+        """Advance the numerical simulation of one single step.
+
+        Important: the step dt is a maximum boundary that is *not* guaranteed
+        to be met if dt is too large for the underlying numerical
+        implementation. However, ``step(dt)`` should never cross the desired
+        time step, i.e. if dt is small enough to ensure stability, step
+        should match it.
+
+        The caller will know how much has been actually advanced by looking
+        at the output of ``step()`` or by monitoring ``self.t`` or `self.yr``
+
+        Parameters
+        ----------
+        dt : float
+             the step length in seconds
+
+        Returns
+        -------
+        the actual dt chosen by the numerical implementation. Guaranteed to
+        be dt or lower.
+        """
         raise NotImplementedError
 
     def run_until_back(self, y1):
@@ -647,7 +672,7 @@ class  FlowlineModel(object):
                 raise FloatingPointError('NaN in numerical solution.')
 
     def run_until(self, y1):
-        """Runs the model from the current year up to a given year y1.
+        """Runs the model from the current year up to a given year date y1.
 
         This function runs the model for the time difference y1-self.y0
         If self.y0 has not been specified at some point, it is 0 and y1 will
@@ -655,14 +680,26 @@ class  FlowlineModel(object):
 
         Parameters
         ----------
-        y1 : int
+        y1 : float
             Upper time span for how long the model should run
         """
 
-        t = (y1-self.y0) * SEC_IN_YEAR
+        # We force timesteps at the same frequency as the mb model update
+        if self.mb_step == 'monthly':
+            ts = utils.monthly_timeseries(self.yr, y1)
+        else:
+            ts = np.arange(np.floor(self.yr), np.floor(y1)+1)
 
-        while self.t < t:
-            self.step(t-self.t)
+        # Add the last date to be sure we end on it
+        ts = np.append(ts, y1)
+
+        # Loop over the steps we want to meet
+        for y in ts:
+            t = (y - self.y0) * SEC_IN_YEAR
+            # because of CFL, step() doesn't ensure that the end date is met
+            # lets run the steps until we reach our desired date
+            while self.t < t:
+                self.step(t-self.t)
 
         # Check for domain bounds
         if self.check_for_boundaries:
@@ -675,7 +712,7 @@ class  FlowlineModel(object):
                 raise FloatingPointError('NaN in numerical solution.')
 
     def run_until_and_store(self, y1, run_path=None, diag_path=None,
-                            store_monthly_step=False):
+                            store_monthly_step=None):
         """Runs the model and returns intermediate steps in xarray datasets.
 
         This function repeatedly calls FlowlineModel.run_until for either
@@ -684,13 +721,16 @@ class  FlowlineModel(object):
         Parameters
         ----------
         y1 : int
-            Upper time span for how long the model should run
+            Upper time span for how long the model should run (needs to be
+            a full year)
         run_path : str
             Path and filename where to store the model run dataset
         diag_path : str
             Path and filename where to store the model diagnostics dataset
         store_monthly_step : Bool
-            If True (False)  model diagnostics will be stored monthly (yearly)
+            If True (False)  model diagnostics will be stored monthly (yearly).
+            If unspecified, we follow the update of the MB model, which
+            defaults to yearly (see __init__).
 
         Returns
         -------
@@ -704,8 +744,15 @@ class  FlowlineModel(object):
             and ELA of the glacier.
         """
 
+        if int(y1) != y1:
+            raise InvalidParamsError('run_until_and_store only accepts '
+                                     'integer year dates.')
+
         # time
         yearly_time = np.arange(np.floor(self.yr), np.floor(y1)+1)
+
+        if store_monthly_step is None:
+            store_monthly_step = self.mb_step == 'monthly'
 
         if store_monthly_step:
             monthly_time = utils.monthly_timeseries(self.yr, y1)
@@ -718,6 +765,11 @@ class  FlowlineModel(object):
         if run_path is not None:
             self.to_netcdf(run_path)
         ny = len(yearly_time)
+        if ny == 1:
+            yrs = [yrs]
+            cyrs = [cyrs]
+            months = [months]
+            cmonths = [cmonths]
         nm = len(monthly_time)
         sects = [(np.zeros((ny, fl.nx)) * np.NaN) for fl in self.fls]
         widths = [(np.zeros((ny, fl.nx)) * np.NaN) for fl in self.fls]
@@ -845,8 +897,7 @@ class FluxBasedModel(FlowlineModel):
     def __init__(self, flowlines, mb_model=None, y0=0., glen_a=None,
                  fs=0., inplace=False, fixed_dt=None, cfl_number=0.05,
                  min_dt=1*SEC_IN_HOUR, max_dt=10*SEC_IN_DAY,
-                 time_stepping='user',
-                 **kwargs):
+                 time_stepping='user', **kwargs):
         """ Instanciate.
 
         Parameters
@@ -858,8 +909,7 @@ class FluxBasedModel(FlowlineModel):
         """
         super(FluxBasedModel, self).__init__(flowlines, mb_model=mb_model,
                                              y0=y0, glen_a=glen_a, fs=fs,
-                                             inplace=inplace,
-                                             **kwargs)
+                                             inplace=inplace, **kwargs)
 
         if time_stepping == 'ambitious':
             cfl_number = 0.1
@@ -919,6 +969,10 @@ class FluxBasedModel(FlowlineModel):
 
     def step(self, dt):
         """Advance one step."""
+
+        # Just a check to avoid useless computations
+        if dt <= 0:
+            raise InvalidParamsError('dt needs to be strictly positive')
 
         # This is to guarantee a precise arrival on a specific date if asked
         min_dt = dt if dt < self.min_dt else self.min_dt
@@ -1226,8 +1280,8 @@ class KarthausModel(FlowlineModel):
     """The actual model"""
 
     def __init__(self, flowlines, mb_model=None, y0=0., glen_a=None, fs=0.,
-                 fixed_dt=None, min_dt=SEC_IN_DAY,
-                 max_dt=31*SEC_IN_DAY, inplace=False):
+                 fixed_dt=None, min_dt=SEC_IN_DAY, max_dt=31*SEC_IN_DAY,
+                 inplace=False, **kwargs):
         """ Instanciate.
 
         Parameters
@@ -1244,7 +1298,7 @@ class KarthausModel(FlowlineModel):
 
         super(KarthausModel, self).__init__(flowlines, mb_model=mb_model,
                                             y0=y0, glen_a=glen_a, fs=fs,
-                                            inplace=inplace)
+                                            inplace=inplace, **kwargs)
         self.dt_warning = False,
         if fixed_dt is not None:
             min_dt = fixed_dt
@@ -1254,6 +1308,10 @@ class KarthausModel(FlowlineModel):
 
     def step(self, dt):
         """Advance one step."""
+
+        # Just a check to avoid useless computations
+        if dt <= 0:
+            raise InvalidParamsError('dt needs to be strictly positive')
 
         # This is to guarantee a precise arrival on a specific date if asked
         min_dt = dt if dt < self.min_dt else self.min_dt
@@ -1305,6 +1363,7 @@ class KarthausModel(FlowlineModel):
 
         # Next step
         self.t += dt
+        return dt
 
 
 class MUSCLSuperBeeModel(FlowlineModel):
@@ -1315,7 +1374,7 @@ class MUSCLSuperBeeModel(FlowlineModel):
 
     def __init__(self, flowlines, mb_model=None, y0=0., glen_a=None, fs=None,
                  fixed_dt=None, min_dt=SEC_IN_DAY, max_dt=31*SEC_IN_DAY,
-                 inplace=False):
+                 inplace=False, **kwargs):
         """ Instanciate.
 
         Parameters
@@ -1332,7 +1391,7 @@ class MUSCLSuperBeeModel(FlowlineModel):
 
         super(MUSCLSuperBeeModel, self).__init__(flowlines, mb_model=mb_model,
                                                  y0=y0, glen_a=glen_a, fs=fs,
-                                                 inplace=inplace)
+                                                 inplace=inplace, **kwargs)
         self.dt_warning = False,
         if fixed_dt is not None:
             min_dt = fixed_dt
@@ -1353,12 +1412,16 @@ class MUSCLSuperBeeModel(FlowlineModel):
     def step(self, dt):
         """Advance one step."""
 
+        # Just a check to avoid useless computations
+        if dt <= 0:
+            raise InvalidParamsError('dt needs to be strictly positive')
+
+        # Guarantee a precise arrival on a specific date if asked
+        min_dt = dt if dt < self.min_dt else self.min_dt
+        dt = np.clip(dt, min_dt, self.max_dt)
+
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=RuntimeWarning)
-
-            # Guarantee a precise arrival on a specific date if asked
-            min_dt = dt if dt < self.min_dt else self.min_dt
-            dt = np.clip(dt, min_dt, self.max_dt)
 
             fl = self.fls[0]
             dx = fl.dx_meter
@@ -1811,14 +1874,20 @@ def robust_model_run(gdir, output_filesuffix=None, mb_model=None,
                                time_stepping=step,
                                is_tidewater=gdir.is_tidewater,
                                **kwargs)
-        try:
-            model.run_until_and_store(ye, run_path=run_path,
-                                      diag_path=diag_path,
-                                      store_monthly_step=store_monthly_step)
-        except (RuntimeError, FloatingPointError):
-            if step == 'ultra-conservative':
-                raise
-            continue
+
+        with np.warnings.catch_warnings():
+            # For operational runs we ignore the warnings
+            np.warnings.filterwarnings('ignore', category=RuntimeWarning)
+            try:
+                model.run_until_and_store(ye, run_path=run_path,
+                                          diag_path=diag_path,
+                                          store_monthly_step=store_monthly_step
+                                          )
+            except (RuntimeError, FloatingPointError):
+                if step == 'ultra-conservative':
+                    raise
+                continue
+
         # If we get here we good
         log.info('(%s) %s time stepping was successful!', gdir.rgi_id, step)
         break
@@ -1976,7 +2045,7 @@ def run_constant_climate(gdir, nyears=1000, y0=None, halfsize=15,
 
 
 @entity_task(log)
-def run_from_climate_data(gdir, ys=None, ye=None,
+def run_from_climate_data(gdir, ys=None, ye=None, min_ys=None,
                           store_monthly_step=False,
                           climate_filename='climate_monthly',
                           climate_input_filesuffix='', output_filesuffix='',
@@ -1994,9 +2063,13 @@ def run_from_climate_data(gdir, ys=None, ye=None,
     gdir : :py:class:`oggm.GlacierDirectory`
         the glacier directory to process
     ys : int
-        start year of the model run (default: from the config file)
+        start year of the model run (default: from the glacier geometry
+        date)
     ye : int
-        end year of the model run (default: from the config file)
+        end year of the model run (no default: needs to be set)
+    min_ys : int
+        if you want to impose a minimum start year, regardless if the glacier
+        inventory date is later.
     store_monthly_step : bool
         whether to store the diagnostic data at a monthly time step or not
         (default is yearly)
@@ -2024,9 +2097,14 @@ def run_from_climate_data(gdir, ys=None, ye=None,
     """
 
     if ys is None:
-        ys = cfg.PARAMS['ys']
+        try:
+            ys = gdir.rgi_date.year
+        except AttributeError:
+            ys = gdir.rgi_date
     if ye is None:
-        ye = cfg.PARAMS['ye']
+        raise InvalidParamsError('Need to set the `ye` kwarg!')
+    if min_ys is not None:
+        ys = ys if ys < min_ys else min_ys
 
     if init_model_filesuffix is not None:
         fp = gdir.get_filepath('model_run', filesuffix=init_model_filesuffix)

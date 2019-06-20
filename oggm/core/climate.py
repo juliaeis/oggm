@@ -857,7 +857,7 @@ def t_star_from_refmb(gdir, mbdf=None, glacierwide=None,
         glacierwide = cfg.PARAMS['tstar_search_glacierwide']
 
     # Be sure we have no marine terminating glacier
-    assert gdir.terminus_type == 'Land-terminating'
+    assert not gdir.is_tidewater
 
     # Reference time series
     if mbdf is None:
@@ -1038,15 +1038,15 @@ def local_t_star(gdir, *, ref_df=None, tstar=None, bias=None):
                 v = gdir.rgi_version[0]  # major version relevant
 
                 # Check that the params are fine
-                str_s = 'cru4' if 'CRU' in source else 'histalp'
-                vn = 'ref_tstars_rgi{}_{}_calib_params'.format(v, str_s)
+                s = 'cru4' if 'CRU' in source else 'histalp'
+                vn = 'oggm_ref_tstars_rgi{}_{}_calib_params'.format(v, s)
                 for k in params:
                     if cfg.PARAMS[k] != cfg.PARAMS[vn][k]:
                         msg = ('The reference t* you are trying to use was '
                                'calibrated with different MB parameters. You '
                                'might have to run the calibration manually.')
                         raise MassBalanceCalibrationError(msg)
-                ref_df = cfg.PARAMS['ref_tstars_rgi{}_{}'.format(v, str_s)]
+                ref_df = cfg.PARAMS['oggm_ref_tstars_rgi{}_{}'.format(v, s)]
             else:
                 # Use the the local calibration
                 fp = os.path.join(cfg.PATHS['working_dir'], 'ref_tstars.csv')
@@ -1157,8 +1157,15 @@ def _recursive_mu_star_calibration(gdir, fls, t_star, first_call=True,
                                           args=(fls, cmb, temp, prcp, widths),
                                           xtol=1e-5)
         except ValueError:
-            raise MassBalanceCalibrationError('{} mu* out of specified '
-                                              'bounds.'.format(gdir.rgi_id))
+            # This happens in very rare cases
+            _mu_lim = _mu_star_per_minimization(cfg.PARAMS['min_mu_star'],
+                                                fls, cmb, temp, prcp, widths)
+            if _mu_lim < 0 and np.allclose(_mu_lim, 0):
+                mu_star = 0.
+            else:
+                raise MassBalanceCalibrationError('{} mu* out of specified '
+                                                  'bounds.'.format(gdir.rgi_id)
+                                                  )
 
         if not np.isfinite(mu_star):
             raise MassBalanceCalibrationError('{} '.format(gdir.rgi_id) +
@@ -1325,7 +1332,7 @@ def mu_star_calibration(gdir):
 
 
 @entity_task(log, writes=['inversion_flowlines', 'linear_mb_params'])
-def apparent_mb_from_linear_mb(gdir, mb_gradient=3.):
+def apparent_mb_from_linear_mb(gdir, mb_gradient=3., ela_h=None):
     """Compute apparent mb from a linear mass-balance assumption (for testing).
 
     This is for testing currently, but could be used as alternative method
@@ -1351,8 +1358,10 @@ def apparent_mb_from_linear_mb(gdir, mb_gradient=3.):
         smb = mbmod.get_specific_mb(heights=h, widths=w)
         return (smb - cmb)**2
 
-    ela_h = optimization.minimize(to_minimize, [0.], bounds=((0, 10000), ))
-    ela_h = ela_h['x'][0]
+    if ela_h is None:
+        ela_h = optimization.minimize(to_minimize, [0.], bounds=((0, 10000), ))
+        ela_h = ela_h['x'][0]
+
     mbmod = LinearMassBalance(ela_h, grad=mb_gradient)
 
     # For each flowline compute the apparent MB

@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 from scipy.signal import gaussian
+import salem
 from configobj import ConfigObj, ConfigObjError
 
 # Local logger
@@ -85,6 +86,7 @@ PARAMS = ResettingOrderedDict()
 PATHS = PathOrderedDict()
 BASENAMES = DocumentedDict()
 LRUHANDLERS = ResettingOrderedDict()
+DATA = ResettingOrderedDict()
 
 # Constants
 SEC_IN_YEAR = 365*24*3600
@@ -201,8 +203,16 @@ _doc = ('A netcdf file containing the model diagnostics (volume, '
         'mass-balance, length...).')
 BASENAMES['model_diagnostics'] = ('model_diagnostics.nc', _doc)
 
-_doc = 'Calving output'
+_doc = ('A csv file containing the output of each iteration of the '
+        'find_inversion_calving_loop task loop.')
+BASENAMES['calving_loop'] = ('calving_loop.csv', _doc)
+
+_doc = 'Calving output (deprecated).'
 BASENAMES['calving_output'] = ('calving_output.pkl', _doc)
+
+_doc = "A dict containing the glacier's t*, bias, mu*. Analogous " \
+       "to 'local_mustar.json', but for the volume/area scaling model."
+BASENAMES['vascaling_mustar'] = ('vascaling_mustar.json', _doc)
 
 
 def set_logging_config(logging_level='INFO'):
@@ -284,6 +294,7 @@ def initialize(file=None, logging_level='INFO'):
     global IS_INITIALIZED
     global PARAMS
     global PATHS
+    global DATA
 
     set_logging_config(logging_level=logging_level)
 
@@ -328,6 +339,7 @@ def initialize(file=None, logging_level='INFO'):
     PARAMS['use_tar_shapefiles'] = cp.as_bool('use_tar_shapefiles')
     PARAMS['clip_mu_star'] = cp.as_bool('clip_mu_star')
     PARAMS['clip_tidewater_border'] = cp.as_bool('clip_tidewater_border')
+    PARAMS['dl_verify'] = cp.as_bool('dl_verify')
 
     # Climate
     PARAMS['baseline_climate'] = cp['baseline_climate'].strip().upper()
@@ -367,7 +379,7 @@ def initialize(file=None, logging_level='INFO'):
            'tstar_search_window', 'use_bias_for_run', 'hydro_month_sh',
            'use_intersects', 'filter_min_slope', 'clip_tidewater_border',
            'auto_skip_task', 'correct_for_neg_flux', 'filter_for_neg_flux',
-           'rgi_version',
+           'rgi_version', 'dl_verify',
            'use_shape_factor_for_inversion', 'use_rgi_area',
            'use_shape_factor_for_fluxbasedmodel', 'baseline_climate']
     for k in ltr:
@@ -377,15 +389,18 @@ def initialize(file=None, logging_level='INFO'):
     for k in cp:
         PARAMS[k] = cp.as_float(k)
 
-    # Read-in the reference t* data - maybe it will be used, maybe not
-    fns = ['ref_tstars_rgi5_cru4', 'ref_tstars_rgi6_cru4',
-           'ref_tstars_rgi5_histalp', 'ref_tstars_rgi6_histalp']
-    for fn in fns:
-        PARAMS[fn] = pd.read_csv(get_demo_file('oggm_' + fn + '.csv'))
-        fpath = get_demo_file('oggm_' + fn + '_calib_params.json')
-        with open(fpath, 'r') as fp:
-            mbpar = json.load(fp)
-        PARAMS[fn+'_calib_params'] = mbpar
+    # Read-in the reference t* data for all available models types (oggm, vas)
+    model_prefixes = ['oggm_', 'vas_']
+    for prefix in model_prefixes:
+        fns = ['ref_tstars_rgi5_cru4', 'ref_tstars_rgi6_cru4',
+               'ref_tstars_rgi5_histalp', 'ref_tstars_rgi6_histalp']
+        for fn in fns:
+            fpath = get_demo_file(prefix + fn + '.csv')
+            PARAMS[prefix + fn] = pd.read_csv(fpath)
+            fpath = get_demo_file(prefix + fn + '_calib_params.json')
+            with open(fpath, 'r') as fp:
+                mbpar = json.load(fp)
+            PARAMS[prefix + fn + '_calib_params'] = mbpar
 
     # Empty defaults
     set_intersects_db()
@@ -394,6 +409,24 @@ def initialize(file=None, logging_level='INFO'):
     # Pre extract cru cl to avoid problems by multiproc
     from oggm.utils import get_cru_cl_file
     get_cru_cl_file()
+
+    # Read in the demo glaciers
+    file = os.path.join(os.path.abspath(os.path.dirname(__file__)),
+                        'data', 'demo_glaciers.csv')
+    DATA['demo_glaciers'] = pd.read_csv(file, index_col=0)
+
+    # Add other things
+    if 'dem_grids' not in DATA:
+        grids = {}
+        for grid_json in ['gimpdem_90m_v01.1.json',
+                          'arcticdem_mosaic_100m_v3.0.json',
+                          'AntarcticDEM_wgs84.json',
+                          'REMA_100m_dem.json']:
+            if grid_json not in grids:
+                fp = os.path.join(os.path.abspath(os.path.dirname(__file__)),
+                                  'data', grid_json)
+                grids[grid_json] = salem.Grid.from_json(fp)
+        DATA['dem_grids'] = grids
 
 
 def oggm_static_paths():
@@ -549,6 +582,7 @@ def pack_config():
         'PARAMS': PARAMS,
         'PATHS': PATHS,
         'LRUHANDLERS': LRUHANDLERS,
+        'DATA': DATA,
         'BASENAMES': dict(BASENAMES)
     }
 
@@ -556,12 +590,13 @@ def pack_config():
 def unpack_config(cfg_dict):
     """Unpack and apply the config packed via pack_config."""
 
-    global IS_INITIALIZED, PARAMS, PATHS, BASENAMES, LRUHANDLERS
+    global IS_INITIALIZED, PARAMS, PATHS, BASENAMES, LRUHANDLERS, DATA
 
     IS_INITIALIZED = cfg_dict['IS_INITIALIZED']
     PARAMS = cfg_dict['PARAMS']
     PATHS = cfg_dict['PATHS']
     LRUHANDLERS = cfg_dict['LRUHANDLERS']
+    DATA = cfg_dict['DATA']
 
     # BASENAMES is a DocumentedDict, which cannot be pickled because
     # set intentionally mismatches with get
