@@ -109,12 +109,20 @@ class TestGIS(unittest.TestCase):
 
         # Change area
         prev_area = gdir.rgi_area_km2
+        prev_lon = gdir.cenlon
+        prev_lat = gdir.cenlat
         cfg.PARAMS['use_rgi_area'] = False
         entity = gpd.read_file(hef_file).iloc[0]
         gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir,
                                      reset=True)
         gis.define_glacier_region(gdir, entity=entity)
+        # Close but not same
+        assert gdir.rgi_area_km2 != prev_area
+        assert gdir.cenlon != prev_lon
+        assert gdir.cenlat != prev_lat
         np.testing.assert_allclose(gdir.rgi_area_km2, prev_area, atol=0.01)
+        np.testing.assert_allclose(gdir.cenlon, prev_lon, atol=1e-4)
+        np.testing.assert_allclose(gdir.cenlat, prev_lat, atol=1e-4)
 
         assert gdir.status == 'Glacier or ice cap'
 
@@ -227,6 +235,12 @@ class TestGIS(unittest.TestCase):
         assert np.all(glacier_ext_erosion[ice_divides == 1])
         np.testing.assert_allclose(np.std(glacier_ext_erosion - glacier_ext),
                                    0, atol=0.1)
+
+        entity['RGIFlag'] = '2909'
+        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir, reset=True)
+        with pytest.raises(RuntimeError):
+            gis.glacier_masks(gdir)
+
 
     @pytest.mark.skipif((LooseVersion(rasterio.__version__) <
                          LooseVersion('1.0')),
@@ -1257,7 +1271,8 @@ class TestClimate(unittest.TestCase):
         centerlines.catchment_width_geom(gdir)
         centerlines.catchment_width_correction(gdir)
         climate.process_custom_climate_data(gdir)
-        climate.glacier_mu_candidates(gdir)
+        with pytest.warns(DeprecationWarning):
+            climate.glacier_mu_candidates(gdir)
 
         se = gdir.read_pickle('climate_info')['mu_candidates_glacierwide']
         self.assertTrue(se.index[0] == 1802)
@@ -1290,7 +1305,8 @@ class TestClimate(unittest.TestCase):
         centerlines.catchment_width_geom(gdir)
         centerlines.catchment_width_correction(gdir)
         climate.process_custom_climate_data(gdir)
-        climate.glacier_mu_candidates(gdir)
+        with pytest.warns(DeprecationWarning):
+            climate.glacier_mu_candidates(gdir)
 
         mbdf = gdir.get_ref_mb_data()['ANNUAL_BALANCE']
 
@@ -1403,7 +1419,8 @@ class TestClimate(unittest.TestCase):
         centerlines.catchment_width_geom(gdir)
         centerlines.catchment_width_correction(gdir)
         climate.process_custom_climate_data(gdir)
-        climate.glacier_mu_candidates(gdir)
+        with pytest.warns(DeprecationWarning):
+            climate.glacier_mu_candidates(gdir)
         mbdf = gdir.get_ref_mb_data()
         res = climate.t_star_from_refmb(gdir, mbdf=mbdf['ANNUAL_BALANCE'])
         t_star, bias = res['t_star'], res['bias']
@@ -1476,7 +1493,8 @@ class TestClimate(unittest.TestCase):
         centerlines.catchment_width_geom(gdir)
         centerlines.catchment_width_correction(gdir)
         climate.process_custom_climate_data(gdir)
-        climate.glacier_mu_candidates(gdir)
+        with pytest.warns(DeprecationWarning):
+            climate.glacier_mu_candidates(gdir)
         mbdf = gdir.get_ref_mb_data()
         res = climate.t_star_from_refmb(gdir, mbdf=mbdf['ANNUAL_BALANCE'])
         t_star, bias = res['t_star'], res['bias']
@@ -2784,7 +2802,7 @@ class TestGCMClimate(unittest.TestCase):
         cfg.PATHS['cesm_precl_file'] = f
         gcm_climate.process_cesm_data(gdir, filesuffix=filesuffix)
         utils.compile_climate_input([gdir], filename=filename,
-                                    filesuffix=filesuffix)
+                                    input_filesuffix=filesuffix)
 
         # CRU
         f1 = os.path.join(cfg.PATHS['working_dir'], 'climate_input.nc')
